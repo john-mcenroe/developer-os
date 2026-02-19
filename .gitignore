@@ -1,0 +1,18 @@
+# Large data files
+*.gml
+*.gfs
+*.geojson
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDE
+.claude/settings.local.json
+.vscode/
+.idea/
+
+# OS
+.DS_Store

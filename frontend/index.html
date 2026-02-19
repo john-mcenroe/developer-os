@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LandOS — Dublin Parcel Explorer</title>
+
+  <!-- MapLibre GL JS (CDN) -->
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Map canvas -->
+  <div id="map"></div>
+
+  <!-- Search bar -->
+  <div id="search-container">
+    <input
+      id="search-input"
+      type="text"
+      placeholder="Search Dublin… e.g. Stoneybatter, D7"
+      autocomplete="off"
+    />
+    <button id="search-btn">Search</button>
+    <div id="search-results"></div>
+  </div>
+
+  <!-- Layer toggle panel -->
+  <div id="layer-panel">
+    <h3>Layers</h3>
+    <div id="layer-list">
+      <!-- Populated by app.js after /api/layers -->
+    </div>
+  </div>
+
+  <!-- Zoom hint -->
+  <div id="zoom-hint">Zoom in to see parcels (zoom 15+)</div>
+
+  <!-- Detail sidebar -->
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <span id="sidebar-title">Parcel Detail</span>
+      <button id="sidebar-close" title="Close">✕</button>
+    </div>
+    <div id="sidebar-content">
+      <p style="color:#555; font-size:13px;">Click a parcel to see its details.</p>
+    </div>
+  </div>
+
+  <script src="app.js?v=2"></script>
+</body>
+</html>
