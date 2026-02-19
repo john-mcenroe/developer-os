@@ -327,7 +327,7 @@ def get_sold_stats(
         with conn.cursor() as cur:
             center_sql = "ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 2157)"
 
-            # Aggregates
+            # Aggregates (exclude outliers: sale_price 0 or > €10M for robust stats)
             cur.execute(
                 f"""
                 SELECT
@@ -348,12 +348,13 @@ def get_sold_stats(
                     {center_sql},
                     %s
                 )
+                AND sale_price > 0 AND sale_price < 10000000
                 """,
                 (lng, lat, radius),
             )
             agg = cur.fetchone()
 
-            # Property type breakdown
+            # Property type breakdown (same outlier filter)
             cur.execute(
                 f"""
                 SELECT COALESCE(property_type, 'Unknown'), COUNT(*)
@@ -363,6 +364,7 @@ def get_sold_stats(
                     {center_sql},
                     %s
                 )
+                AND sale_price > 0 AND sale_price < 10000000
                 GROUP BY property_type
                 ORDER BY COUNT(*) DESC
                 """,
@@ -370,7 +372,7 @@ def get_sold_stats(
             )
             type_rows = cur.fetchall()
 
-            # Individual properties (for sidebar list)
+            # Individual properties (for sidebar list, same outlier filter)
             cur.execute(
                 f"""
                 SELECT
@@ -383,6 +385,7 @@ def get_sold_stats(
                     {center_sql},
                     %s
                 )
+                AND sale_price > 0 AND sale_price < 10000000
                 ORDER BY sale_date DESC NULLS LAST
                 LIMIT 200
                 """,
