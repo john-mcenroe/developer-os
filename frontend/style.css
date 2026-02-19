@@ -204,6 +204,82 @@ body {
   margin: 14px 0;
 }
 
+/* ── Circle analysis button ────────────────────────────────────── */
+#circle-mode-btn {
+  width: 100%;
+  padding: 7px 12px;
+  border: 1px solid #555;
+  border-radius: 6px;
+  background: transparent;
+  color: #ccc;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+#circle-mode-btn:hover { border-color: #9b59b6; color: #fff; }
+#circle-mode-btn.active {
+  background: rgba(155, 89, 182, 0.25);
+  border-color: #9b59b6;
+  color: #9b59b6;
+  font-weight: 600;
+}
+
+/* ── Radius slider ────────────────────────────────────────────── */
+.circle-radius-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0 4px;
+}
+.circle-radius-control input[type="range"] {
+  flex: 1;
+  accent-color: #9b59b6;
+  height: 4px;
+  cursor: pointer;
+}
+.circle-radius-control span {
+  font-size: 13px;
+  color: #9b59b6;
+  font-weight: 600;
+  min-width: 48px;
+  text-align: right;
+}
+
+/* ── Property type breakdown bars ─────────────────────────────── */
+.type-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.type-bar-label {
+  font-size: 11px;
+  color: #aaa;
+  min-width: 70px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.type-bar-track {
+  flex: 1;
+  height: 8px;
+  background: #2a2a2a;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.type-bar-fill {
+  height: 100%;
+  background: #9b59b6;
+  border-radius: 4px;
+  min-width: 2px;
+}
+.type-bar-count {
+  font-size: 11px;
+  color: #888;
+  min-width: 24px;
+}
+
 /* ── Zoom hint ──────────────────────────────────────────────────── */
 #zoom-hint {
   position: absolute;

@@ -1,6 +1,11 @@
 const API = "http://localhost:8000/api";
 const PARCEL_MIN_ZOOM = 15;
 
+// ── Circle analysis state ────────────────────────────────────────────────────
+let circleMode = false;
+let circleCenter = null;  // { lng, lat }
+let circleRadiusM = 500;  // metres
+
 // ── Map initialisation ───────────────────────────────────────────────────────
 const map = new maplibregl.Map({
   container: "map",
@@ -178,6 +183,64 @@ map.on("load", () => {
     },
   });
 
+  // Sold Properties — price-colored circles
+  map.addSource("sold-properties", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+
+  map.addLayer({
+    id: "sold_properties-fill",
+    type: "circle",
+    source: "sold-properties",
+    paint: {
+      "circle-radius": [
+        "interpolate", ["linear"], ["zoom"],
+        13, 3,
+        16, 6,
+        18, 9,
+      ],
+      "circle-color": [
+        "interpolate", ["linear"], ["coalesce", ["get", "sale_price"], 0],
+        100000, "#f1c40f",
+        300000, "#e67e22",
+        500000, "#e74c3c",
+        1000000, "#8e44ad",
+        3000000, "#2c3e50",
+      ],
+      "circle-stroke-color": "#fff",
+      "circle-stroke-width": 0.5,
+      "circle-opacity": 0.85,
+    },
+  });
+
+  // Circle analysis overlay
+  map.addSource("analysis-circle", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+
+  map.addLayer({
+    id: "analysis-circle-fill",
+    type: "fill",
+    source: "analysis-circle",
+    paint: {
+      "fill-color": "rgba(155, 89, 182, 0.15)",
+      "fill-outline-color": "rgba(155, 89, 182, 0)",
+    },
+  });
+
+  map.addLayer({
+    id: "analysis-circle-outline",
+    type: "line",
+    source: "analysis-circle",
+    paint: {
+      "line-color": "#9b59b6",
+      "line-width": 2,
+      "line-dasharray": [4, 3],
+    },
+  });
+
   // Initial load
   loadParcels();
   loadLayers();
@@ -266,6 +329,20 @@ function loadParcels() {
     const srcPts = map.getSource("dlr-planning-points");
     if (srcPts) srcPts.setData({ type: "FeatureCollection", features: [] });
   }
+
+  // Sold Properties — points (zoom 13+)
+  if (zoom >= 13 && isLayerVisible("sold_properties")) {
+    fetch(`${API}/sold_properties?bbox=${bbox}`)
+      .then((r) => r.json())
+      .then((geojson) => {
+        const src = map.getSource("sold-properties");
+        if (src) src.setData(geojson);
+      })
+      .catch((err) => console.error("Failed to load sold properties:", err));
+  } else if (zoom < 13) {
+    const srcSold = map.getSource("sold-properties");
+    if (srcSold) srcSold.setData({ type: "FeatureCollection", features: [] });
+  }
 }
 
 function isLayerVisible(layerName) {
@@ -348,11 +425,36 @@ function setupPlanningClick(fillLayerId, selectedLayerId) {
   });
 }
 
+// ── Sold property click handler ───────────────────────────────────────────────
+function setupSoldPropertyClick() {
+  map.on("click", "sold_properties-fill", (e) => {
+    if (!e.features || e.features.length === 0) return;
+    const props = e.features[0].properties;
+
+    // Clear other selections
+    map.setFilter("cadastral_freehold-selected", ["==", ["id"], -1]);
+    map.setFilter("cadastral_leasehold-selected", ["==", ["id"], -1]);
+    if (map.getLayer("dlr_planning_polygons-selected")) {
+      map.setFilter("dlr_planning_polygons-selected", ["==", ["id"], -1]);
+    }
+
+    showSoldSidebar(props);
+  });
+
+  map.on("mouseenter", "sold_properties-fill", () => {
+    map.getCanvas().style.cursor = "pointer";
+  });
+  map.on("mouseleave", "sold_properties-fill", () => {
+    map.getCanvas().style.cursor = "";
+  });
+}
+
 map.on("load", () => {
   setupParcelClick("cadastral_freehold-fill", "cadastral_freehold-selected", "freehold");
   setupParcelClick("cadastral_leasehold-fill", "cadastral_leasehold-selected", "leasehold");
   setupPlanningClick("dlr_planning_polygons-fill", "dlr_planning_polygons-selected");
   setupPlanningClick("dlr_planning_points-fill", null);
+  setupSoldPropertyClick();
 });
 
 // ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -452,6 +554,79 @@ function showPlanningSidebar(data) {
     <div class="detail-row">
       <div class="detail-label">More Info</div>
       <div class="detail-value">${moreInfoLink}</div>
+    </div>
+  `;
+
+  document.getElementById("sidebar").classList.add("open");
+}
+
+function showSoldSidebar(data) {
+  const content = document.getElementById("sidebar-content");
+
+  const salePrice = data.sale_price ? `€${Number(data.sale_price).toLocaleString()}` : "—";
+  const askingPrice = data.asking_price ? `€${Number(data.asking_price).toLocaleString()}` : "—";
+  const priceDelta = data.sale_price && data.asking_price
+    ? `${data.sale_price > data.asking_price ? "+" : ""}€${(data.sale_price - data.asking_price).toLocaleString()}`
+    : null;
+  const deltaColor = priceDelta && data.sale_price > data.asking_price ? "#e74c3c" : "#2ecc71";
+  const pricePerSqm = data.price_per_sqm ? `€${Number(data.price_per_sqm).toLocaleString()}/m²` : "—";
+  const floorArea = data.floor_area_m2 ? `${data.floor_area_m2} m²` : "—";
+  const beds = data.beds != null ? data.beds : "—";
+  const baths = data.baths != null ? data.baths : "—";
+  const saleDate = data.sale_date || "—";
+  const listingLink = data.url
+    ? `<a href="${data.url}" target="_blank" rel="noopener" style="color:#3498db;word-break:break-all;">View Listing</a>`
+    : "—";
+
+  content.innerHTML = `
+    <div class="detail-row">
+      <div class="detail-label">Sale Price</div>
+      <div class="detail-value large" style="color:#e74c3c">${salePrice}</div>
+    </div>
+    ${priceDelta ? `<div class="detail-row">
+      <div class="detail-label">vs Asking</div>
+      <div class="detail-value" style="color:${deltaColor}">${priceDelta} (asking ${askingPrice})</div>
+    </div>` : `<div class="detail-row">
+      <div class="detail-label">Asking Price</div>
+      <div class="detail-value">${askingPrice}</div>
+    </div>`}
+    <div class="detail-row">
+      <div class="detail-label">Price / m²</div>
+      <div class="detail-value">${pricePerSqm}</div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label">Address</div>
+      <div class="detail-value" style="font-size:0.85em;line-height:1.4">${data.address || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Beds / Baths</div>
+      <div class="detail-value">${beds} bed · ${baths} bath</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Floor Area</div>
+      <div class="detail-value">${floorArea}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Property Type</div>
+      <div class="detail-value">${data.property_type || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">BER</div>
+      <div class="detail-value">${data.energy_rating || "—"}</div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label">Sale Date</div>
+      <div class="detail-value">${saleDate}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Agent</div>
+      <div class="detail-value">${data.agent_name || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Listing</div>
+      <div class="detail-value">${listingLink}</div>
     </div>
   `;
 
@@ -583,4 +758,187 @@ function renderLayerPanel(layers) {
     item.appendChild(label);
     panel.appendChild(item);
   });
+}
+
+// ── Circle analysis tool ──────────────────────────────────────────────────────
+
+// Generate a GeoJSON circle polygon from center + radius (no library needed)
+function makeCircleGeoJSON(center, radiusM, steps = 64) {
+  const coords = [];
+  const earthRadius = 6371000; // metres
+  const lat = (center.lat * Math.PI) / 180;
+  const lng = (center.lng * Math.PI) / 180;
+  for (let i = 0; i <= steps; i++) {
+    const angle = (i / steps) * 2 * Math.PI;
+    const dx = radiusM * Math.cos(angle);
+    const dy = radiusM * Math.sin(angle);
+    const newLat = lat + dy / earthRadius;
+    const newLng = lng + dx / (earthRadius * Math.cos(lat));
+    coords.push([(newLng * 180) / Math.PI, (newLat * 180) / Math.PI]);
+  }
+  return {
+    type: "FeatureCollection",
+    features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [coords] }, properties: {} }],
+  };
+}
+
+function toggleCircleMode() {
+  circleMode = !circleMode;
+  const btn = document.getElementById("circle-mode-btn");
+  if (circleMode) {
+    btn.classList.add("active");
+    map.getCanvas().style.cursor = "crosshair";
+  } else {
+    btn.classList.remove("active");
+    map.getCanvas().style.cursor = "";
+    clearCircle();
+  }
+}
+
+function clearCircle() {
+  circleCenter = null;
+  const src = map.getSource("analysis-circle");
+  if (src) src.setData({ type: "FeatureCollection", features: [] });
+  document.getElementById("sidebar").classList.remove("open");
+}
+
+// Map click handler for circle placement
+map.on("click", (e) => {
+  if (!circleMode) return;
+
+  circleCenter = { lng: e.lngLat.lng, lat: e.lngLat.lat };
+  updateCircle();
+  fetchCircleStats();
+
+  // Stop propagation to prevent parcel/property click handlers
+  e.preventDefault();
+});
+
+function updateCircle() {
+  if (!circleCenter) return;
+  const geoJSON = makeCircleGeoJSON(circleCenter, circleRadiusM);
+  const src = map.getSource("analysis-circle");
+  if (src) src.setData(geoJSON);
+}
+
+let circleStatsTimer = null;
+function fetchCircleStats() {
+  if (!circleCenter) return;
+  clearTimeout(circleStatsTimer);
+  circleStatsTimer = setTimeout(() => {
+    const url = `${API}/sold_stats?lng=${circleCenter.lng}&lat=${circleCenter.lat}&radius=${circleRadiusM}`;
+    fetch(url)
+      .then((r) => r.json())
+      .then((data) => showCircleStatsSidebar(data))
+      .catch((err) => console.error("Failed to fetch circle stats:", err));
+  }, 200);
+}
+
+function onRadiusChange(val) {
+  circleRadiusM = Number(val);
+  document.getElementById("radius-display").textContent = `${circleRadiusM}m`;
+  updateCircle();
+  fetchCircleStats();
+}
+
+function showCircleStatsSidebar(data) {
+  const content = document.getElementById("sidebar-content");
+  const count = data.count || 0;
+
+  if (count === 0) {
+    content.innerHTML = `
+      <div class="detail-row">
+        <div class="detail-label">Radius</div>
+        <div class="detail-value large" style="color:#9b59b6">${data.radius_m}m</div>
+      </div>
+      <div class="circle-radius-control">
+        <input type="range" id="radius-slider" min="100" max="2000" step="50" value="${circleRadiusM}"
+          oninput="onRadiusChange(this.value)">
+        <span id="radius-display">${circleRadiusM}m</span>
+      </div>
+      <hr>
+      <p style="color:#888; font-size:13px; text-align:center; margin-top:20px;">No sold properties found within this radius.</p>
+    `;
+    document.getElementById("sidebar").classList.add("open");
+    return;
+  }
+
+  const avgSale = `€${data.avg_sale_price.toLocaleString()}`;
+  const medianSale = `€${data.median_sale_price.toLocaleString()}`;
+  const minSale = `€${data.min_sale_price.toLocaleString()}`;
+  const maxSale = `€${data.max_sale_price.toLocaleString()}`;
+  const stddev = `€${data.stddev_sale_price.toLocaleString()}`;
+  const avgAsking = data.avg_asking_price ? `€${data.avg_asking_price.toLocaleString()}` : "—";
+  const avgPsm = data.avg_price_per_sqm ? `€${data.avg_price_per_sqm.toLocaleString()}/m²` : "—";
+  const avgArea = data.avg_floor_area_m2 ? `${data.avg_floor_area_m2} m²` : "—";
+
+  // Property type breakdown bars
+  const totalForTypes = Object.values(data.property_type_breakdown).reduce((a, b) => a + b, 0);
+  const typeBars = Object.entries(data.property_type_breakdown)
+    .map(([type, cnt]) => {
+      const pct = Math.round((cnt / totalForTypes) * 100);
+      return `<div class="type-bar-row">
+        <span class="type-bar-label">${type || "Unknown"}</span>
+        <div class="type-bar-track"><div class="type-bar-fill" style="width:${pct}%"></div></div>
+        <span class="type-bar-count">${cnt}</span>
+      </div>`;
+    })
+    .join("");
+
+  content.innerHTML = `
+    <div class="detail-row">
+      <div class="detail-label">Radius</div>
+      <div class="detail-value large" style="color:#9b59b6">${data.radius_m}m</div>
+    </div>
+    <div class="circle-radius-control">
+      <input type="range" id="radius-slider" min="100" max="2000" step="50" value="${circleRadiusM}"
+        oninput="onRadiusChange(this.value)">
+      <span id="radius-display">${circleRadiusM}m</span>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label">Properties Found</div>
+      <div class="detail-value large" style="color:#9b59b6">${count}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Avg Sale Price</div>
+      <div class="detail-value large" style="color:#e74c3c">${avgSale}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Median Sale Price</div>
+      <div class="detail-value">${medianSale}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Range</div>
+      <div class="detail-value">${minSale} — ${maxSale}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Std Deviation</div>
+      <div class="detail-value">${stddev}</div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label">Avg Asking Price</div>
+      <div class="detail-value">${avgAsking}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Avg Price / m²</div>
+      <div class="detail-value">${avgPsm}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Avg Floor Area</div>
+      <div class="detail-value">${avgArea}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Avg Beds / Baths</div>
+      <div class="detail-value">${data.avg_beds} bed · ${data.avg_baths} bath</div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label">Property Types</div>
+    </div>
+    ${typeBars}
+  `;
+
+  document.getElementById("sidebar").classList.add("open");
 }

@@ -179,6 +179,83 @@ else
   echo "==> Skipping DLR Planning Points (file not found at $DLR_POINTS)"
 fi
 
+# ── Sold Properties (from MongoDB) ────────────────────────────────────────────
+echo "==> Loading Sold Properties from MongoDB..."
+if docker ps --format '{{.Names}}' | grep -q mongodb-local; then
+  PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" <<SQL
+  DROP TABLE IF EXISTS sold_properties CASCADE;
+  CREATE TABLE sold_properties (
+    id SERIAL PRIMARY KEY,
+    mongo_id TEXT,
+    address TEXT,
+    sale_price INTEGER,
+    asking_price INTEGER,
+    beds INTEGER,
+    baths INTEGER,
+    property_type TEXT,
+    energy_rating TEXT,
+    agent_name TEXT,
+    sale_date DATE,
+    floor_area_m2 DOUBLE PRECISION,
+    url TEXT,
+    geom GEOMETRY(Point, 4326)
+  );
+  CREATE INDEX idx_sold_properties_geom ON sold_properties USING GIST(geom);
+SQL
+
+  # Export from MongoDB and load into PostGIS
+  docker exec mongodb-local mongosh real_estate --quiet --eval "
+    const docs = db.sold_properties.find(
+      { latitude: { \\\$gt: 53.0, \\\$lt: 53.6 }, longitude: { \\\$gt: -6.6, \\\$lt: -5.9 } },
+      { _id: 1, address: 1, sale_price: 1, asking_price: 1, beds: 1, baths: 1, property_type: 1, energy_rating: 1, agent_name: 1, sale_date: 1, myhome_floor_area_value: 1, url: 1, latitude: 1, longitude: 1 }
+    ).toArray();
+    print(JSON.stringify(docs));
+  " > /tmp/sold_properties_dublin.json
+
+  python3 -c "
+import json, csv, io
+with open('/tmp/sold_properties_dublin.json') as f:
+    docs = json.load(f)
+buf = io.StringIO()
+writer = csv.writer(buf, delimiter='\t')
+for doc in docs:
+    lat, lng = doc.get('latitude'), doc.get('longitude')
+    if lat is None or lng is None: continue
+    if not (51.0 < lat < 56.0 and -11.0 < lng < -5.0): continue
+    sd = (doc.get('sale_date') or '')[:10]
+    writer.writerow([
+        str(doc.get('_id','')), (doc.get('address') or '').replace('\t',' ').replace('\n',' '),
+        doc.get('sale_price',''), doc.get('asking_price',''),
+        doc.get('beds',''), doc.get('baths',''),
+        doc.get('property_type',''), doc.get('energy_rating',''),
+        (doc.get('agent_name') or '').replace('\t',' '), sd,
+        doc.get('myhome_floor_area_value',''), doc.get('url',''),
+        f'SRID=4326;POINT({lng} {lat})'
+    ])
+with open('/tmp/sold_properties.tsv','w') as f: f.write(buf.getvalue())
+print(f'Exported {len(docs)} sold properties')
+  "
+
+  PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+    -c "\COPY sold_properties(mongo_id,address,sale_price,asking_price,beds,baths,property_type,energy_rating,agent_name,sale_date,floor_area_m2,url,geom) FROM '/tmp/sold_properties.tsv' WITH (FORMAT text, NULL '')"
+
+  PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" <<SQL
+  INSERT INTO layers (name, display_name, table_name, is_active, min_zoom, style)
+  VALUES (
+    'sold_properties',
+    'Sold Properties',
+    'sold_properties',
+    true,
+    13,
+    '{"fillColor": "#e74c3c", "strokeColor": "#c0392b", "radius": 5}'
+  )
+  ON CONFLICT (name) DO NOTHING;
+SQL
+  echo "    Loaded $(PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT COUNT(*) FROM sold_properties;") sold properties."
+else
+  echo "==> Skipping Sold Properties (mongodb-local container not running)"
+fi
+
 echo ""
 echo "==> Done! Summary:"
 PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \

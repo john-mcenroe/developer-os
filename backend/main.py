@@ -242,6 +242,192 @@ def get_planning_apps_points(bbox: str = Query(..., description="west,south,east
     return JSONResponse({"type": "FeatureCollection", "features": features})
 
 
+@app.get("/api/sold_properties")
+def get_sold_properties(bbox: str = Query(..., description="west,south,east,north")):
+    """Return sold properties within the bounding box as GeoJSON points."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    address,
+                    sale_price,
+                    asking_price,
+                    beds,
+                    baths,
+                    property_type,
+                    energy_rating,
+                    agent_name,
+                    sale_date::text,
+                    floor_area_m2,
+                    url,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM sold_properties
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 2000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        (
+            fid, address, sale_price, asking_price, beds, baths,
+            property_type, energy_rating, agent_name, sale_date,
+            floor_area, url, geometry,
+        ) = row
+        price_per_sqm = None
+        if sale_price and floor_area:
+            price_per_sqm = round(sale_price / floor_area)
+        features.append(
+            {
+                "type": "Feature",
+                "id": fid,
+                "geometry": geometry,
+                "properties": {
+                    "id": fid,
+                    "address": address,
+                    "sale_price": sale_price,
+                    "asking_price": asking_price,
+                    "beds": beds,
+                    "baths": baths,
+                    "property_type": property_type,
+                    "energy_rating": energy_rating,
+                    "agent_name": agent_name,
+                    "sale_date": sale_date,
+                    "floor_area_m2": floor_area,
+                    "price_per_sqm": price_per_sqm,
+                    "url": url,
+                },
+            }
+        )
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
+@app.get("/api/sold_stats")
+def get_sold_stats(
+    lng: float = Query(...),
+    lat: float = Query(...),
+    radius: float = Query(500, description="Radius in metres"),
+):
+    """Return aggregate stats for sold properties within a circle."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            center_sql = "ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 2157)"
+
+            # Aggregates
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS cnt,
+                    COALESCE(ROUND(AVG(sale_price)), 0) AS avg_sale,
+                    COALESCE(MIN(sale_price), 0) AS min_sale,
+                    COALESCE(MAX(sale_price), 0) AS max_sale,
+                    COALESCE(ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY sale_price)), 0) AS median_sale,
+                    COALESCE(ROUND(STDDEV(sale_price)), 0) AS stddev_sale,
+                    COALESCE(ROUND(AVG(asking_price)), 0) AS avg_asking,
+                    COALESCE(ROUND(AVG(CASE WHEN floor_area_m2 > 0 THEN sale_price / floor_area_m2 END)), 0) AS avg_price_sqm,
+                    COALESCE(ROUND(AVG(floor_area_m2)::numeric, 1), 0) AS avg_floor_area,
+                    COALESCE(ROUND(AVG(beds)::numeric, 1), 0) AS avg_beds,
+                    COALESCE(ROUND(AVG(baths)::numeric, 1), 0) AS avg_baths
+                FROM sold_properties
+                WHERE ST_DWithin(
+                    ST_Transform(geom, 2157),
+                    {center_sql},
+                    %s
+                )
+                """,
+                (lng, lat, radius),
+            )
+            agg = cur.fetchone()
+
+            # Property type breakdown
+            cur.execute(
+                f"""
+                SELECT COALESCE(property_type, 'Unknown'), COUNT(*)
+                FROM sold_properties
+                WHERE ST_DWithin(
+                    ST_Transform(geom, 2157),
+                    {center_sql},
+                    %s
+                )
+                GROUP BY property_type
+                ORDER BY COUNT(*) DESC
+                """,
+                (lng, lat, radius),
+            )
+            type_rows = cur.fetchall()
+
+            # Individual properties (for sidebar list)
+            cur.execute(
+                f"""
+                SELECT
+                    id, address, sale_price, asking_price, beds, baths,
+                    property_type, sale_date::text, floor_area_m2,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM sold_properties
+                WHERE ST_DWithin(
+                    ST_Transform(geom, 2157),
+                    {center_sql},
+                    %s
+                )
+                ORDER BY sale_date DESC NULLS LAST
+                LIMIT 200
+                """,
+                (lng, lat, radius),
+            )
+            prop_rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    (
+        count, avg_sale, min_sale, max_sale, median_sale, stddev_sale,
+        avg_asking, avg_price_sqm, avg_floor_area, avg_beds, avg_baths,
+    ) = agg
+
+    type_breakdown = {r[0]: r[1] for r in type_rows}
+
+    properties = []
+    for r in prop_rows:
+        fid, addr, sp, ap, beds, baths, ptype, sdate, fa, geom = r
+        properties.append({
+            "id": fid, "address": addr, "sale_price": sp,
+            "asking_price": ap, "beds": beds, "baths": baths,
+            "property_type": ptype, "sale_date": sdate,
+            "floor_area_m2": float(fa) if fa else None,
+        })
+
+    return {
+        "center": {"lng": lng, "lat": lat},
+        "radius_m": radius,
+        "count": count,
+        "avg_sale_price": int(avg_sale),
+        "median_sale_price": int(median_sale),
+        "min_sale_price": int(min_sale),
+        "max_sale_price": int(max_sale),
+        "stddev_sale_price": int(stddev_sale),
+        "avg_asking_price": int(avg_asking),
+        "avg_price_per_sqm": int(avg_price_sqm),
+        "avg_floor_area_m2": float(avg_floor_area),
+        "avg_beds": float(avg_beds),
+        "avg_baths": float(avg_baths),
+        "property_type_breakdown": type_breakdown,
+        "properties": properties,
+    }
+
+
 @app.get("/api/parcel/{parcel_id}")
 def get_parcel(parcel_id: int, parcel_type: str = Query("freehold")):
     """Return full detail for a single parcel. Use ?parcel_type=leasehold for leasehold."""
