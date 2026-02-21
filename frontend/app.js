@@ -5,6 +5,7 @@ const PARCEL_MIN_ZOOM = 15;
 let circleMode = false;
 let circleCenter = null;  // { lng, lat }
 let circleRadiusM = 500;  // metres
+let circleDrawing = false;  // true while dragging to define radius
 
 // ── Map initialisation ───────────────────────────────────────────────────────
 const map = new maplibregl.Map({
@@ -374,6 +375,7 @@ function updateZoomHint(zoom) {
 // ── Parcel click (works for both freehold and leasehold) ─────────────────────
 function setupParcelClick(fillLayerId, selectedLayerId, parcelType) {
   map.on("click", fillLayerId, (e) => {
+    if (circleMode) return;
     if (!e.features || e.features.length === 0) return;
     const feature = e.features[0];
     const id = feature.id;
@@ -402,6 +404,7 @@ function setupParcelClick(fillLayerId, selectedLayerId, parcelType) {
 // ── Planning app click handler ────────────────────────────────────────────────
 function setupPlanningClick(fillLayerId, selectedLayerId) {
   map.on("click", fillLayerId, (e) => {
+    if (circleMode) return;
     if (!e.features || e.features.length === 0) return;
     const feature = e.features[0];
     const id = feature.id;
@@ -428,6 +431,7 @@ function setupPlanningClick(fillLayerId, selectedLayerId) {
 // ── Sold property click handler ───────────────────────────────────────────────
 function setupSoldPropertyClick() {
   map.on("click", "sold_properties-fill", (e) => {
+    if (circleMode) return;
     if (!e.features || e.features.length === 0) return;
     const props = e.features[0].properties;
 
@@ -762,6 +766,19 @@ function renderLayerPanel(layers) {
 
 // ── Circle analysis tool ──────────────────────────────────────────────────────
 
+// Distance in metres between two lng/lat points (Haversine)
+function haversineMetres(lng1, lat1, lng2, lat2) {
+  const R = 6371000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 // Generate a GeoJSON circle polygon from center + radius (no library needed)
 function makeCircleGeoJSON(center, radiusM, steps = 64) {
   const coords = [];
@@ -785,33 +802,59 @@ function makeCircleGeoJSON(center, radiusM, steps = 64) {
 function toggleCircleMode() {
   circleMode = !circleMode;
   const btn = document.getElementById("circle-mode-btn");
+  if (!btn) return;
+  const mapEl = document.getElementById("map");
   if (circleMode) {
     btn.classList.add("active");
-    map.getCanvas().style.cursor = "crosshair";
+    if (mapEl) mapEl.classList.add("circle-mode");
+    if (map && map.dragPan) map.dragPan.disable();
   } else {
     btn.classList.remove("active");
-    map.getCanvas().style.cursor = "";
+    if (mapEl) mapEl.classList.remove("circle-mode");
+    if (map && map.dragPan) map.dragPan.enable();
     clearCircle();
   }
 }
 
+document.getElementById("circle-mode-btn")?.addEventListener("click", toggleCircleMode);
+
 function clearCircle() {
   circleCenter = null;
+  circleDrawing = false;
   const src = map.getSource("analysis-circle");
   if (src) src.setData({ type: "FeatureCollection", features: [] });
   document.getElementById("sidebar").classList.remove("open");
 }
 
-// Map click handler for circle placement
-map.on("click", (e) => {
+// Draw circle by click-and-drag: mousedown = center, drag = radius
+map.on("mousedown", (e) => {
   if (!circleMode) return;
-
+  e.preventDefault();
   circleCenter = { lng: e.lngLat.lng, lat: e.lngLat.lat };
+  circleRadiusM = 100;  // start small
+  circleDrawing = true;
+  updateCircle();
+});
+
+map.on("mousemove", (e) => {
+  if (!circleMode || !circleDrawing || !circleCenter) return;
+  const dist = haversineMetres(circleCenter.lng, circleCenter.lat, e.lngLat.lng, e.lngLat.lat);
+  circleRadiusM = Math.max(100, Math.min(2000, Math.round(dist / 50) * 50));
   updateCircle();
   fetchCircleStats();
+});
 
-  // Stop propagation to prevent parcel/property click handlers
-  e.preventDefault();
+map.on("mouseup", (e) => {
+  if (!circleMode || !circleDrawing) return;
+  circleDrawing = false;
+  fetchCircleStats();
+});
+
+map.on("mouseleave", () => {
+  if (circleMode && circleDrawing) {
+    circleDrawing = false;
+    fetchCircleStats();
+  }
 });
 
 function updateCircle() {
@@ -840,6 +883,611 @@ function onRadiusChange(val) {
   updateCircle();
   fetchCircleStats();
 }
+
+// ── AI Assistant ─────────────────────────────────────────────────────────────
+const aiPanel = document.getElementById("ai-panel");
+const aiMessages = document.getElementById("ai-messages");
+const aiInput = document.getElementById("ai-input");
+const aiSendBtn = document.getElementById("ai-send");
+const aiSuggestionsEl = document.getElementById("ai-suggestions");
+const aiResultsContainer = document.getElementById("ai-results-container");
+const aiResultsList = document.getElementById("ai-results-list");
+const aiResultsCount = document.getElementById("ai-results-count");
+const aiInsightsContainer = document.getElementById("ai-insights-container");
+const aiStarterOptions = document.getElementById("ai-starter-options");
+
+let aiConversation = []; // {role, content}
+let aiMarkers = [];       // MapLibre markers on the map
+let aiActiveResultIdx = -1;
+let aiHasStarted = false; // track if user has made first query
+
+// ── 5 Starter analysis options ──────────────────────────────────────────────
+const STARTER_OPTIONS = [
+  {
+    icon: "📉",
+    label: "Undervalued areas",
+    prompt: "Find areas in Dublin where properties are selling significantly below asking price. Cross-reference with nearby RZLT sites and large parcels to identify development opportunities where land may be undervalued.",
+    reason: "Properties selling below asking price signal weak demand or motivated sellers. Combined with RZLT tax pressure and available land, these areas often represent the best entry points for developers before prices correct upward."
+  },
+  {
+    icon: "🔥",
+    label: "RZLT motivated sellers",
+    prompt: "Find the largest RZLT (Residential Zoned Land Tax) sites in Dublin. For each area with RZLT sites, also show nearby sold property prices to estimate land value and development potential.",
+    reason: "RZLT imposes a 3% annual tax on idle zoned land — owners of large sites face growing holding costs every year. This creates urgency to sell or develop, giving buyers negotiation leverage that doesn't exist in normal market conditions."
+  },
+  {
+    icon: "🏗️",
+    label: "Large development sites",
+    prompt: "Find the largest freehold parcels (1000+ sqm) across Dublin. Cross-reference with RZLT zones, nearby sold property prices per sqm, and any planning applications to assess development feasibility.",
+    reason: "Large freehold parcels are the raw material for multi-unit developments. By cross-referencing with zoning, nearby prices, and planning history, you can quickly identify which big sites are actually buildable and what the end-sale revenue might look like."
+  },
+  {
+    icon: "✅",
+    label: "Planning approval hotspots",
+    prompt: "Analyze planning applications in Dún Laoghaire-Rathdown. Find areas with the most granted planning permissions, especially for multi-unit residential. Show nearby property prices to estimate post-development values.",
+    reason: "Areas with high planning approval rates have a proven permitting pathway — the council has already said yes to similar projects nearby. This dramatically reduces your biggest risk (planning refusal) and gives you precedent to reference in your own application."
+  },
+  {
+    icon: "💰",
+    label: "Best price-per-sqm value",
+    prompt: "Find properties and areas with the lowest price per square metre in Dublin. Compare different neighborhoods and property types. Identify where floor space is cheapest relative to the Dublin average and cross-reference with development land availability.",
+    reason: "Low price-per-sqm areas that are adjacent to expensive neighborhoods represent the classic 'gentrification frontier.' Developers who build quality stock in these transition zones capture the price convergence as the area improves."
+  },
+];
+
+function renderStarterOptions() {
+  if (!aiStarterOptions) return;
+  aiStarterOptions.innerHTML = "";
+
+  STARTER_OPTIONS.forEach((opt, idx) => {
+    const btn = document.createElement("button");
+    btn.className = "ai-starter-btn";
+    btn.dataset.idx = idx;
+    btn.innerHTML = `<span class="ai-starter-icon">${opt.icon}</span><span class="ai-starter-label">${opt.label}</span>`;
+
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      // Show explainer first
+      showStarterExplainer(opt, btn);
+    });
+
+    aiStarterOptions.appendChild(btn);
+  });
+}
+
+function showStarterExplainer(opt, anchorBtn) {
+  // Remove any existing explainer
+  document.querySelectorAll(".ai-starter-explainer").forEach(el => el.remove());
+
+  const explainer = document.createElement("div");
+  explainer.className = "ai-starter-explainer";
+  explainer.innerHTML = `
+    <div class="ai-explainer-header">
+      <span>${opt.icon} ${opt.label}</span>
+      <button class="ai-explainer-close" title="Close">✕</button>
+    </div>
+    <div class="ai-explainer-reason">${opt.reason}</div>
+    <button class="ai-explainer-run">Run this analysis →</button>
+  `;
+
+  // Insert after the starter options
+  aiStarterOptions.parentNode.insertBefore(explainer, aiStarterOptions.nextSibling);
+
+  // Close button
+  explainer.querySelector(".ai-explainer-close").addEventListener("click", (e) => {
+    e.stopPropagation();
+    explainer.remove();
+  });
+
+  // Run button
+  explainer.querySelector(".ai-explainer-run").addEventListener("click", (e) => {
+    e.stopPropagation();
+    explainer.remove();
+    hideStarterOptions();
+    sendAiMessage(opt.prompt);
+  });
+
+  // Scroll into view
+  setTimeout(() => explainer.scrollIntoView({ behavior: "smooth", block: "nearest" }), 50);
+}
+
+function hideStarterOptions() {
+  if (aiStarterOptions) aiStarterOptions.style.display = "none";
+  aiHasStarted = true;
+  // Remove any explainer too
+  document.querySelectorAll(".ai-starter-explainer").forEach(el => el.remove());
+}
+
+// Toggle panel expand/collapse
+function toggleAiPanel() {
+  aiPanel.classList.toggle("expanded");
+  if (aiPanel.classList.contains("expanded")) {
+    setTimeout(() => aiInput.focus(), 350);
+  }
+}
+
+document.getElementById("ai-panel-header").addEventListener("click", toggleAiPanel);
+document.getElementById("ai-panel-expand").addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleAiPanel();
+});
+
+// Auto-expand on first load and render starters
+setTimeout(() => {
+  aiPanel.classList.add("expanded");
+  renderStarterOptions();
+}, 800);
+
+// Send message
+async function sendAiMessage(text) {
+  if (!text || !text.trim()) return;
+  text = text.trim();
+
+  // Hide starters on first use
+  if (!aiHasStarted) hideStarterOptions();
+
+  // Add user message to UI
+  addAiMessage("user", text);
+  aiInput.value = "";
+  aiSuggestionsEl.innerHTML = "";
+
+  // Clear previous insights
+  if (aiInsightsContainer) aiInsightsContainer.innerHTML = "";
+
+  // Add to conversation
+  aiConversation.push({ role: "user", content: text });
+
+  // Show loading
+  const loadingEl = addAiMessage("loading", "Analyzing across all data layers");
+  aiSendBtn.classList.add("loading");
+
+  try {
+    const resp = await fetch(`${API}/ai/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: aiConversation }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `Error ${resp.status}`);
+    }
+
+    const data = await resp.json();
+
+    // Remove loading
+    loadingEl.remove();
+    aiSendBtn.classList.remove("loading");
+
+    // Store response in conversation
+    aiConversation.push({ role: "assistant", content: JSON.stringify(data) });
+
+    // Handle explore response (hypothesis-driven pipeline)
+    if (data.type === "explore") {
+      // Show title + summary as message
+      const summaryText = data.title
+        ? `${data.title}\n${data.summary || ""}`
+        : data.summary || data.message || "Analysis complete.";
+      addAiMessage("assistant", summaryText);
+
+      // Show hypothesis cards
+      if (data.hypotheses && data.hypotheses.length > 0) {
+        showHypotheses(data.hypotheses);
+      }
+
+      // Show results on map
+      if (data.results && data.results.length > 0) {
+        showAiResults(data.results);
+      } else {
+        addAiMessage("assistant", "No matching results found on the map for this query. Try a different area or broader criteria.");
+      }
+
+      // Show follow-up chips
+      if (data.follow_ups && data.follow_ups.length > 0) {
+        showAiFollowUps(data.follow_ups);
+      }
+    }
+    // Handle analysis response (legacy format)
+    else if (data.type === "analysis") {
+      const summaryText = data.title
+        ? `${data.title}\n${data.summary || ""}`
+        : data.summary || data.message || "Analysis complete.";
+      addAiMessage("assistant", summaryText);
+
+      if (data.insights && data.insights.length > 0) {
+        showAiInsights(data.insights);
+      }
+
+      if (data.results && data.results.length > 0) {
+        showAiResults(data.results);
+      } else {
+        addAiMessage("assistant", "No matching results found on the map for this query. Try a different area or broader criteria.");
+      }
+
+      if (data.follow_ups && data.follow_ups.length > 0) {
+        showAiFollowUps(data.follow_ups);
+      }
+    }
+    // Backwards compat for "search" type
+    else if (data.type === "search") {
+      addAiMessage("assistant", data.message || "Search complete.");
+      if (data.results && data.results.length > 0) {
+        showAiResults(data.results);
+      }
+    }
+    // Fallback for clarify (shouldn't happen with new prompt)
+    else if (data.type === "clarify") {
+      addAiMessage("assistant", data.message || "Let me try that differently...");
+      if (data.suggestions && data.suggestions.length > 0) {
+        showAiFollowUps(data.suggestions.map(s => ({
+          label: s.length > 30 ? s.substring(0, 28) + "…" : s,
+          prompt: s,
+          reason: ""
+        })));
+      }
+    }
+    else {
+      addAiMessage("assistant", data.message || JSON.stringify(data));
+    }
+  } catch (err) {
+    loadingEl.remove();
+    aiSendBtn.classList.remove("loading");
+    addAiMessage("assistant", `Something went wrong: ${err.message}`);
+    console.error("AI chat error:", err);
+  }
+}
+
+function addAiMessage(role, text) {
+  const div = document.createElement("div");
+  div.className = `ai-msg ai-msg-${role}`;
+
+  const content = document.createElement("div");
+  content.className = "ai-msg-content";
+
+  if (role === "loading") {
+    content.innerHTML = `<span class="ai-loading-icon">⚡</span>${text}<span class="ai-loading-dots"></span>`;
+  } else if (role === "assistant" && text.includes("\n")) {
+    // Title + summary split
+    const lines = text.split("\n");
+    const titleEl = document.createElement("div");
+    titleEl.className = "ai-msg-title";
+    titleEl.textContent = lines[0];
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "ai-msg-body";
+    bodyEl.textContent = lines.slice(1).join("\n").trim();
+    content.appendChild(titleEl);
+    content.appendChild(bodyEl);
+  } else {
+    content.textContent = text;
+  }
+
+  div.appendChild(content);
+  aiMessages.appendChild(div);
+  aiMessages.scrollTop = aiMessages.scrollHeight;
+
+  return div;
+}
+
+function showAiInsights(insights) {
+  if (!aiInsightsContainer) return;
+  aiInsightsContainer.innerHTML = "";
+  aiInsightsContainer.style.display = "block";
+
+  insights.forEach((insight) => {
+    const card = document.createElement("div");
+    card.className = "ai-insight-card";
+    card.innerHTML = `
+      <div class="ai-insight-data">${insight.data_point || ""}</div>
+      <div class="ai-insight-heading">${insight.heading || ""}</div>
+      <div class="ai-insight-text">${insight.text || ""}</div>
+    `;
+    aiInsightsContainer.appendChild(card);
+  });
+}
+
+function showHypotheses(hypotheses) {
+  if (!aiInsightsContainer) return;
+  aiInsightsContainer.innerHTML = "";
+  aiInsightsContainer.style.display = "block";
+
+  hypotheses.forEach((h) => {
+    const card = document.createElement("div");
+    const status = (h.status || "moderate").toLowerCase();
+    card.className = `ai-hypothesis-card ai-hypothesis-${status}`;
+    card.innerHTML = `
+      <div class="ai-hypothesis-header">
+        <span class="ai-hypothesis-name">${h.name || ""}</span>
+        <span class="ai-hypothesis-badge ai-hypothesis-badge-${status}">${status}</span>
+      </div>
+      <div class="ai-hypothesis-verdict">${h.verdict || ""}</div>
+    `;
+    aiInsightsContainer.appendChild(card);
+  });
+}
+
+function showAiFollowUps(followUps) {
+  aiSuggestionsEl.innerHTML = "";
+  followUps.forEach((fu) => {
+    const chip = document.createElement("button");
+    chip.className = "ai-followup-chip";
+
+    const label = typeof fu === "string" ? fu : fu.label;
+    const prompt = typeof fu === "string" ? fu : fu.prompt;
+    const reason = typeof fu === "string" ? "" : (fu.reason || "");
+
+    chip.innerHTML = `<span class="ai-followup-label">${label}</span>`;
+
+    if (reason) {
+      chip.setAttribute("title", reason);
+      // Add a small info dot
+      const dot = document.createElement("span");
+      dot.className = "ai-followup-info";
+      dot.textContent = "?";
+      dot.addEventListener("click", (e) => {
+        e.stopPropagation();
+        showFollowUpReason(chip, reason);
+      });
+      chip.appendChild(dot);
+    }
+
+    chip.addEventListener("click", () => {
+      // Remove any open reason tooltip
+      document.querySelectorAll(".ai-followup-reason").forEach(el => el.remove());
+      sendAiMessage(prompt);
+    });
+    aiSuggestionsEl.appendChild(chip);
+  });
+}
+
+function showFollowUpReason(anchor, reason) {
+  // Remove existing
+  document.querySelectorAll(".ai-followup-reason").forEach(el => el.remove());
+
+  const tip = document.createElement("div");
+  tip.className = "ai-followup-reason";
+  tip.textContent = reason;
+
+  // Insert into the suggestions container
+  const container = anchor.closest("#ai-suggestions");
+  if (container) {
+    container.appendChild(tip);
+  }
+
+  // Auto-dismiss after 5s
+  setTimeout(() => tip.remove(), 5000);
+}
+
+function showAiResults(results) {
+  clearAiMarkers();
+  aiResultsContainer.style.display = "block";
+  aiResultsCount.textContent = `${results.length} results`;
+  aiResultsList.innerHTML = "";
+  aiActiveResultIdx = -1;
+
+  results.forEach((result, idx) => {
+    const card = document.createElement("div");
+    card.className = "ai-result-card";
+    card.dataset.idx = idx;
+
+    // Rank badge
+    const rank = document.createElement("div");
+    rank.className = "ai-result-rank";
+    rank.textContent = idx + 1;
+
+    // Info section
+    const info = document.createElement("div");
+    info.className = "ai-result-info";
+
+    const title = document.createElement("div");
+    title.className = "ai-result-title";
+    const meta = document.createElement("div");
+    meta.className = "ai-result-meta";
+
+    // Format based on table type
+    const table = result._table;
+    if (table === "sold_properties") {
+      title.textContent = result.address || "Unknown Address";
+      const price = result.sale_price ? `€${Number(result.sale_price).toLocaleString()}` : "—";
+      const area = result.floor_area_m2 ? `${result.floor_area_m2}m²` : "";
+      const beds = result.beds ? `${result.beds}bed` : "";
+      meta.textContent = [price, result.property_type, area, beds].filter(Boolean).join(" · ");
+    } else if (table === "cadastral_freehold" || table === "cadastral_leasehold") {
+      title.textContent = result.national_ref || result.inspire_id || `Parcel #${result.id}`;
+      const area = result.area_sqm ? `${Number(result.area_sqm).toLocaleString()}m²` : "";
+      const acres = result.area_sqm ? `(${(result.area_sqm / 4046.86).toFixed(2)}ac)` : "";
+      const type = table === "cadastral_freehold" ? "Freehold" : "Leasehold";
+      meta.textContent = [type, area, acres].filter(Boolean).join(" · ");
+    } else if (table === "rzlt") {
+      title.textContent = result.zone_desc || "RZLT Site";
+      const area = result.site_area ? `${Number(result.site_area).toLocaleString()}m²` : "";
+      meta.textContent = [result.local_authority_name, area, "3% annual tax"].filter(Boolean).join(" · ");
+    } else if (table === "dlr_planning_polygons") {
+      title.textContent = result.plan_ref || "Planning App";
+      meta.textContent = [result.decision, result.location].filter(Boolean).join(" · ");
+    }
+
+    info.appendChild(title);
+    info.appendChild(meta);
+
+    // Opportunity reason (from hypothesis evaluation)
+    if (result.opportunity_reason) {
+      const reason = document.createElement("div");
+      reason.className = "ai-result-reason";
+      reason.textContent = result.opportunity_reason;
+      info.appendChild(reason);
+    }
+
+    // Badge
+    const badge = document.createElement("div");
+    badge.className = "ai-result-badge";
+    if (table === "sold_properties") {
+      badge.classList.add("price");
+      badge.textContent = result.sale_price ? `€${(result.sale_price / 1000).toFixed(0)}k` : "—";
+    } else if (table && table.startsWith("cadastral")) {
+      badge.classList.add("area");
+      badge.textContent = result.area_sqm ? `${(result.area_sqm / 1000).toFixed(1)}k m²` : "—";
+    } else if (table === "rzlt") {
+      badge.classList.add("rzlt");
+      badge.textContent = "RZLT";
+    } else if (table === "dlr_planning_polygons") {
+      badge.classList.add("planning");
+      badge.textContent = result.decision ? result.decision.substring(0, 6) : "—";
+    }
+
+    card.appendChild(rank);
+    card.appendChild(info);
+    card.appendChild(badge);
+    aiResultsList.appendChild(card);
+
+    // Add map marker
+    if (result.lng && result.lat) {
+      const markerEl = document.createElement("div");
+      markerEl.className = "ai-marker";
+      markerEl.textContent = idx + 1;
+      markerEl.dataset.idx = idx;
+
+      const marker = new maplibregl.Marker({ element: markerEl })
+        .setLngLat([result.lng, result.lat])
+        .addTo(map);
+
+      markerEl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        selectAiResult(idx, results);
+      });
+
+      aiMarkers.push({ marker, result });
+    }
+
+    // Click handler
+    card.addEventListener("click", () => selectAiResult(idx, results));
+  });
+
+  // Fit map to show all results
+  if (results.length > 0) {
+    const bounds = new maplibregl.LngLatBounds();
+    let hasPoints = false;
+    results.forEach((r) => {
+      if (r.lng && r.lat) {
+        bounds.extend([r.lng, r.lat]);
+        hasPoints = true;
+      }
+    });
+    if (hasPoints) {
+      map.fitBounds(bounds, { padding: 80, maxZoom: 16, duration: 1200 });
+    }
+  }
+}
+
+function selectAiResult(idx, results) {
+  const result = results[idx];
+  if (!result) return;
+
+  aiActiveResultIdx = idx;
+
+  // Highlight card
+  aiResultsList.querySelectorAll(".ai-result-card").forEach((c, i) => {
+    c.classList.toggle("active", i === idx);
+  });
+
+  // Highlight marker
+  document.querySelectorAll(".ai-marker").forEach((m) => {
+    m.classList.toggle("active", parseInt(m.dataset.idx) === idx);
+  });
+
+  // Fly to location
+  if (result.lng && result.lat) {
+    map.flyTo({ center: [result.lng, result.lat], zoom: 17, duration: 1000 });
+  }
+
+  // Show detail in sidebar based on type
+  const table = result._table;
+  if (table === "sold_properties") {
+    showSoldSidebar(result);
+  } else if (table === "cadastral_freehold" || table === "cadastral_leasehold") {
+    showSidebar({
+      id: result.id,
+      national_ref: result.national_ref,
+      inspire_id: result.inspire_id,
+      area_sqm: result.area_sqm,
+      area_acres: result.area_sqm ? +(result.area_sqm / 4046.86).toFixed(3) : null,
+      type: table === "cadastral_freehold" ? "freehold" : "leasehold",
+    });
+  } else if (table === "rzlt") {
+    showRzltSidebar(result);
+  } else if (table === "dlr_planning_polygons") {
+    showPlanningSidebar(result);
+  }
+}
+
+function showRzltSidebar(data) {
+  const content = document.getElementById("sidebar-content");
+  const area = data.site_area ? `${Number(data.site_area).toLocaleString()}` : "—";
+
+  content.innerHTML = `
+    <div class="detail-row">
+      <div class="detail-label">Zone Description</div>
+      <div class="detail-value large" style="color:#ff6b6b">${data.zone_desc || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Site Area</div>
+      <div class="detail-value">${area} m²</div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label">Zone GZT</div>
+      <div class="detail-value">${data.zone_gzt || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">GZT Description</div>
+      <div class="detail-value" style="font-size:0.85em;line-height:1.4">${data.gzt_desc || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Local Authority</div>
+      <div class="detail-value">${data.local_authority_name || "—"}</div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label" style="color:#ff6b6b">RZLT Status</div>
+      <div class="detail-value" style="color:#ff6b6b;font-size:12px;line-height:1.4">Subject to 3% annual Residential Zoned Land Tax — strong motivated seller signal</div>
+    </div>
+  `;
+
+  document.getElementById("sidebar").classList.add("open");
+}
+
+function clearAiMarkers() {
+  aiMarkers.forEach((m) => m.marker.remove());
+  aiMarkers = [];
+}
+
+document.getElementById("ai-results-close").addEventListener("click", () => {
+  aiResultsContainer.style.display = "none";
+  aiResultsList.innerHTML = "";
+  clearAiMarkers();
+});
+
+// Input handlers
+aiSendBtn.addEventListener("click", () => sendAiMessage(aiInput.value));
+
+aiInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendAiMessage(aiInput.value);
+  }
+});
+
+// Keyboard shortcut: Cmd/Ctrl+K to toggle AI panel
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+    e.preventDefault();
+    toggleAiPanel();
+  }
+});
+
+// Move zoom hint up when AI panel is present
+document.getElementById("zoom-hint").style.bottom = "90px";
+
+// ── Circle analysis ──────────────────────────────────────────────────────────
 
 function showCircleStatsSidebar(data) {
   const content = document.getElementById("sidebar-content");

@@ -7,7 +7,9 @@
       "Bash(PGPASSWORD=postgres ogr2ogr:*)",
       "Bash(PGPASSWORD=postgres psql:*)",
       "Bash(curl:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(pip install:*)",
+      "Bash(python -c:*)"
     ]
   }
 }
