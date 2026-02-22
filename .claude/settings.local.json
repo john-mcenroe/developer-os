@@ -14,7 +14,8 @@
       "Bash(node -c:*)",
       "Bash(head:*)",
       "Bash(wc:*)",
-      "Bash(bash scripts/load_census.sh)"
+      "Bash(bash scripts/load_census.sh)",
+      "Bash(xargs kill:*)"
     ]
   }
 }

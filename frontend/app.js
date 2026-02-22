@@ -221,6 +221,82 @@ map.on("load", () => {
     },
   });
 
+  // Census Small Areas — teal/cyan choropleth
+  map.addSource("census-small-areas", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+
+  map.addLayer({
+    id: "census_small_areas-fill",
+    type: "fill",
+    source: "census-small-areas",
+    layout: { visibility: "none" },
+    paint: {
+      "fill-color": [
+        "interpolate", ["linear"],
+        ["coalesce", ["get", "population_density"], 0],
+        0, "rgba(0, 188, 212, 0.05)",
+        2000, "rgba(0, 188, 212, 0.15)",
+        10000, "rgba(0, 188, 212, 0.3)",
+        30000, "rgba(0, 150, 136, 0.45)",
+        80000, "rgba(0, 105, 92, 0.6)",
+      ],
+      "fill-outline-color": "rgba(0, 188, 212, 0)",
+    },
+  });
+
+  map.addLayer({
+    id: "census_small_areas-outline",
+    type: "line",
+    source: "census-small-areas",
+    layout: { visibility: "none" },
+    paint: {
+      "line-color": "#00bcd4",
+      "line-width": 0.5,
+    },
+  });
+
+  map.addLayer({
+    id: "census_small_areas-selected",
+    type: "fill",
+    source: "census-small-areas",
+    layout: { visibility: "none" },
+    filter: ["==", ["id"], -1],
+    paint: {
+      "fill-color": "rgba(0, 230, 255, 0.45)",
+      "fill-outline-color": "#00e5ff",
+    },
+  });
+
+  // Urban Area Boundaries — teal outlines
+  map.addSource("urban-areas", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+
+  map.addLayer({
+    id: "urban_areas-fill",
+    type: "fill",
+    source: "urban-areas",
+    layout: { visibility: "none" },
+    paint: {
+      "fill-color": "rgba(0, 150, 136, 0.1)",
+      "fill-outline-color": "rgba(0, 150, 136, 0)",
+    },
+  });
+
+  map.addLayer({
+    id: "urban_areas-outline",
+    type: "line",
+    source: "urban-areas",
+    layout: { visibility: "none" },
+    paint: {
+      "line-color": "#009688",
+      "line-width": 2,
+    },
+  });
+
   // Circle analysis overlay
   map.addSource("analysis-circle", {
     type: "geojson",
@@ -335,6 +411,31 @@ function loadParcels() {
   } else if (zoom < 12) {
     const srcPts = map.getSource("dlr-planning-points");
     if (srcPts) srcPts.setData({ type: "FeatureCollection", features: [] });
+  }
+
+  // Census Small Areas (zoom 12+)
+  if (zoom >= 12 && isLayerVisible("census_small_areas")) {
+    fetch(`${API}/census_small_areas?bbox=${bbox}`)
+      .then((r) => r.json())
+      .then((geojson) => {
+        const src = map.getSource("census-small-areas");
+        if (src) src.setData(geojson);
+      })
+      .catch((err) => console.error("Failed to load census small areas:", err));
+  } else if (zoom < 12) {
+    const srcCensus = map.getSource("census-small-areas");
+    if (srcCensus) srcCensus.setData({ type: "FeatureCollection", features: [] });
+  }
+
+  // Urban Areas (all zoom levels when visible)
+  if (isLayerVisible("urban_areas")) {
+    fetch(`${API}/urban_areas?bbox=${bbox}`)
+      .then((r) => r.json())
+      .then((geojson) => {
+        const src = map.getSource("urban-areas");
+        if (src) src.setData(geojson);
+      })
+      .catch((err) => console.error("Failed to load urban areas:", err));
   }
 
   // Sold Properties — points (zoom 13+)
@@ -465,6 +566,7 @@ map.on("load", () => {
   setupPlanningClick("dlr_planning_polygons-fill", "dlr_planning_polygons-selected");
   setupPlanningClick("dlr_planning_points-fill", null);
   setupSoldPropertyClick();
+  setupCensusClick();
 });
 
 // ── Flyout Panel ─────────────────────────────────────────────────────────────
@@ -702,6 +804,131 @@ function showRzltFlyout(data) {
   `;
 
   openFlyout("RZLT Site");
+}
+
+// ── Census Small Area click handler ──────────────────────────────────────────
+function setupCensusClick() {
+  map.on("click", "census_small_areas-fill", (e) => {
+    if (circleMode) return;
+    if (!e.features || e.features.length === 0) return;
+    const feature = e.features[0];
+    const id = feature.id;
+    const props = feature.properties;
+
+    // Highlight selected
+    if (map.getLayer("census_small_areas-selected")) {
+      map.setFilter("census_small_areas-selected", ["==", ["id"], id]);
+    }
+
+    showCensusFlyout(props);
+  });
+
+  map.on("mouseenter", "census_small_areas-fill", () => {
+    map.getCanvas().style.cursor = "pointer";
+  });
+  map.on("mouseleave", "census_small_areas-fill", () => {
+    map.getCanvas().style.cursor = "";
+  });
+}
+
+function showCensusFlyout(data) {
+  const pop = data.total_population != null ? data.total_population.toLocaleString() : "—";
+  const hh = data.total_households != null ? data.total_households.toLocaleString() : "—";
+  const hhSize = data.avg_household_size != null ? data.avg_household_size : "—";
+  const density = data.population_density != null ? Math.round(data.population_density).toLocaleString() : "—";
+
+  // Tenure bar
+  const ownerPct = data.owner_occupied_pct || 0;
+  const rentPct = data.rented_pct || 0;
+  const otherPct = Math.max(0, 100 - ownerPct - rentPct);
+
+  // Age profile bar (from properties if available)
+  const aptPct = data.apartment_pct != null ? data.apartment_pct : "—";
+  const vacRate = data.vacancy_rate != null ? data.vacancy_rate : "—";
+  const empRate = data.employment_rate != null ? data.employment_rate : "—";
+  const eduPct = data.third_level_pct != null ? data.third_level_pct : "—";
+  const wfhPct = data.wfh_pct != null ? data.wfh_pct : "—";
+  const healthPct = data.health_good_pct != null ? data.health_good_pct : "—";
+  const avgRooms = data.avg_rooms != null ? data.avg_rooms : "—";
+
+  flyoutContent.innerHTML = `
+    <div class="detail-row">
+      <div class="detail-label">Small Area</div>
+      <div class="detail-value" style="color:#00bcd4">${data.sa_code || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Urban Area</div>
+      <div class="detail-value">${data.urban_area || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">County</div>
+      <div class="detail-value">${data.county || "—"}</div>
+    </div>
+    <hr>
+    <div class="census-section-title">Population</div>
+    <div class="detail-row">
+      <div class="detail-label">Total Population</div>
+      <div class="detail-value large" style="color:#00bcd4">${pop}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Density</div>
+      <div class="detail-value">${density} per km²</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Households</div>
+      <div class="detail-value">${hh}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Avg Household Size</div>
+      <div class="detail-value">${hhSize}</div>
+    </div>
+    <hr>
+    <div class="census-section-title">Housing</div>
+    <div class="detail-row">
+      <div class="detail-label">Tenure</div>
+    </div>
+    <div class="tenure-bar">
+      <div class="tenure-segment owner" style="width:${ownerPct}%" title="Owner occupied ${ownerPct}%"></div>
+      <div class="tenure-segment rented" style="width:${rentPct}%" title="Rented ${rentPct}%"></div>
+      <div class="tenure-segment other" style="width:${otherPct}%" title="Other ${otherPct.toFixed(1)}%"></div>
+    </div>
+    <div class="tenure-legend">
+      <span><span class="legend-dot owner"></span>Owner ${ownerPct}%</span>
+      <span><span class="legend-dot rented"></span>Rented ${rentPct}%</span>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Apartments</div>
+      <div class="detail-value">${aptPct !== "—" ? aptPct + "%" : "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Avg Rooms</div>
+      <div class="detail-value">${avgRooms}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Vacancy Rate</div>
+      <div class="detail-value" style="color:${vacRate > 10 ? '#e74c3c' : vacRate > 5 ? '#f59e0b' : '#2ecc71'}">${vacRate !== "—" ? vacRate + "%" : "—"}</div>
+    </div>
+    <hr>
+    <div class="census-section-title">Socioeconomic</div>
+    <div class="detail-row">
+      <div class="detail-label">Employment Rate</div>
+      <div class="detail-value">${empRate !== "—" ? empRate + "%" : "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Third Level Education</div>
+      <div class="detail-value">${eduPct !== "—" ? eduPct + "%" : "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Work From Home</div>
+      <div class="detail-value">${wfhPct !== "—" ? wfhPct + "%" : "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Good/Very Good Health</div>
+      <div class="detail-value">${healthPct !== "—" ? healthPct + "%" : "—"}</div>
+    </div>
+  `;
+
+  openFlyout("Census 2022");
 }
 
 function showGenericFlyout(data) {
@@ -1030,10 +1257,13 @@ function fetchCircleStats() {
   if (!circleCenter) return;
   clearTimeout(circleStatsTimer);
   circleStatsTimer = setTimeout(() => {
-    const url = `${API}/sold_stats?lng=${circleCenter.lng}&lat=${circleCenter.lat}&radius=${circleRadiusM}`;
-    fetch(url)
-      .then((r) => r.json())
-      .then((data) => showCircleStatsFlyout(data))
+    const soldUrl = `${API}/sold_stats?lng=${circleCenter.lng}&lat=${circleCenter.lat}&radius=${circleRadiusM}`;
+    const censusUrl = `${API}/census_stats?lng=${circleCenter.lng}&lat=${circleCenter.lat}&radius=${circleRadiusM}`;
+    Promise.all([
+      fetch(soldUrl).then((r) => r.json()),
+      fetch(censusUrl).then((r) => r.json()).catch(() => null),
+    ])
+      .then(([soldData, censusData]) => showCircleStatsFlyout(soldData, censusData))
       .catch((err) => console.error("Failed to fetch circle stats:", err));
   }, 200);
 }
@@ -1831,10 +2061,90 @@ document.addEventListener("keydown", (e) => {
 
 // ── Circle analysis ──────────────────────────────────────────────────────────
 
-function showCircleStatsFlyout(data) {
+function showCircleStatsFlyout(data, censusData) {
   const count = data.count || 0;
 
-  if (count === 0) {
+  // Build census demographics section
+  let censusHTML = "";
+  if (censusData && censusData.total_population > 0) {
+    const c = censusData;
+    const ownerPct = c.avg_owner_occupied_pct || 0;
+    const rentPct = c.avg_rented_pct || 0;
+    const otherPct = Math.max(0, 100 - ownerPct - rentPct);
+
+    // Age profile bar
+    const ageTotal = (c.age_profile["0-14"] || 0) + (c.age_profile["15-24"] || 0) +
+      (c.age_profile["25-44"] || 0) + (c.age_profile["45-64"] || 0) + (c.age_profile["65+"] || 0);
+    const ageBars = ageTotal > 0 ? `
+      <div class="age-bar">
+        <div class="age-segment" style="width:${(c.age_profile["0-14"]/ageTotal*100).toFixed(1)}%; background:#4dd0e1" title="0-14: ${c.age_profile["0-14"]}"></div>
+        <div class="age-segment" style="width:${(c.age_profile["15-24"]/ageTotal*100).toFixed(1)}%; background:#26c6da" title="15-24: ${c.age_profile["15-24"]}"></div>
+        <div class="age-segment" style="width:${(c.age_profile["25-44"]/ageTotal*100).toFixed(1)}%; background:#00bcd4" title="25-44: ${c.age_profile["25-44"]}"></div>
+        <div class="age-segment" style="width:${(c.age_profile["45-64"]/ageTotal*100).toFixed(1)}%; background:#00acc1" title="45-64: ${c.age_profile["45-64"]}"></div>
+        <div class="age-segment" style="width:${(c.age_profile["65+"]/ageTotal*100).toFixed(1)}%; background:#0097a7" title="65+: ${c.age_profile["65+"]}"></div>
+      </div>
+      <div class="age-legend">
+        <span>0-14</span><span>15-24</span><span>25-44</span><span>45-64</span><span>65+</span>
+      </div>
+    ` : "";
+
+    censusHTML = `
+      <hr>
+      <div class="census-section-title">Demographics (Census 2022)</div>
+      <div class="detail-row">
+        <div class="detail-label">Population</div>
+        <div class="detail-value large" style="color:#00bcd4">${c.total_population.toLocaleString()}</div>
+      </div>
+      <div class="detail-row">
+        <div class="detail-label">Density</div>
+        <div class="detail-value">${c.avg_population_density.toLocaleString()} per km²</div>
+      </div>
+      <div class="detail-row">
+        <div class="detail-label">Households</div>
+        <div class="detail-value">${c.total_households.toLocaleString()}</div>
+      </div>
+      <div class="detail-row">
+        <div class="detail-label">Small Areas</div>
+        <div class="detail-value">${c.small_area_count}</div>
+      </div>
+      ${ageBars ? `<div class="detail-row"><div class="detail-label">Age Profile</div></div>${ageBars}` : ""}
+      <hr>
+      <div class="detail-row">
+        <div class="detail-label">Tenure</div>
+      </div>
+      <div class="tenure-bar">
+        <div class="tenure-segment owner" style="width:${ownerPct}%" title="Owner ${ownerPct}%"></div>
+        <div class="tenure-segment rented" style="width:${rentPct}%" title="Rented ${rentPct}%"></div>
+        <div class="tenure-segment other" style="width:${otherPct}%"></div>
+      </div>
+      <div class="tenure-legend">
+        <span><span class="legend-dot owner"></span>Owner ${ownerPct}%</span>
+        <span><span class="legend-dot rented"></span>Rented ${rentPct}%</span>
+      </div>
+      <div class="detail-row">
+        <div class="detail-label">Apartments</div>
+        <div class="detail-value">${c.avg_apartment_pct}%</div>
+      </div>
+      <div class="detail-row">
+        <div class="detail-label">Vacancy Rate</div>
+        <div class="detail-value" style="color:${c.avg_vacancy_rate > 10 ? '#e74c3c' : c.avg_vacancy_rate > 5 ? '#f59e0b' : '#2ecc71'}">${c.avg_vacancy_rate}%</div>
+      </div>
+      <div class="detail-row">
+        <div class="detail-label">Employment</div>
+        <div class="detail-value">${c.avg_employment_rate}%</div>
+      </div>
+      <div class="detail-row">
+        <div class="detail-label">Third Level Edu</div>
+        <div class="detail-value">${c.avg_third_level_pct}%</div>
+      </div>
+      <div class="detail-row">
+        <div class="detail-label">Work From Home</div>
+        <div class="detail-value">${c.avg_wfh_pct}%</div>
+      </div>
+    `;
+  }
+
+  if (count === 0 && !censusHTML) {
     flyoutContent.innerHTML = `
       <div class="detail-row">
         <div class="detail-label">Radius</div>
@@ -1846,7 +2156,7 @@ function showCircleStatsFlyout(data) {
         <span id="radius-display">${circleRadiusM}m</span>
       </div>
       <hr>
-      <p style="color:#888; font-size:13px; text-align:center; margin-top:20px;">No sold properties found within this radius.</p>
+      <p style="color:#888; font-size:13px; text-align:center; margin-top:20px;">No data found within this radius.</p>
     `;
     openFlyout("Circle Analysis");
     return;
@@ -1874,17 +2184,7 @@ function showCircleStatsFlyout(data) {
     })
     .join("");
 
-  flyoutContent.innerHTML = `
-    <div class="detail-row">
-      <div class="detail-label">Radius</div>
-      <div class="detail-value large" style="color:#9b59b6">${data.radius_m}m</div>
-    </div>
-    <div class="circle-radius-control">
-      <input type="range" id="radius-slider" min="100" max="2000" step="50" value="${circleRadiusM}"
-        oninput="onRadiusChange(this.value)">
-      <span id="radius-display">${circleRadiusM}m</span>
-    </div>
-    <hr>
+  const soldHTML = count > 0 ? `
     <div class="detail-row">
       <div class="detail-label">Properties Found</div>
       <div class="detail-value large" style="color:#9b59b6">${count}</div>
@@ -1927,6 +2227,21 @@ function showCircleStatsFlyout(data) {
       <div class="detail-label">Property Types</div>
     </div>
     ${typeBars}
+  ` : `<p style="color:#888; font-size:13px; text-align:center;">No sold properties in this radius.</p>`;
+
+  flyoutContent.innerHTML = `
+    <div class="detail-row">
+      <div class="detail-label">Radius</div>
+      <div class="detail-value large" style="color:#9b59b6">${data.radius_m}m</div>
+    </div>
+    <div class="circle-radius-control">
+      <input type="range" id="radius-slider" min="100" max="2000" step="50" value="${circleRadiusM}"
+        oninput="onRadiusChange(this.value)">
+      <span id="radius-display">${circleRadiusM}m</span>
+    </div>
+    <hr>
+    ${soldHTML}
+    ${censusHTML}
   `;
 
   openFlyout("Circle Analysis");

@@ -172,6 +172,222 @@ def get_rzlt(bbox: str = Query(..., description="west,south,east,north")):
     return JSONResponse({"type": "FeatureCollection", "features": features})
 
 
+@app.get("/api/census_small_areas")
+def get_census_small_areas(bbox: str = Query(..., description="west,south,east,north")):
+    """Return Census 2022 Small Area polygons with demographic stats as GeoJSON."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    ogc_fid AS id,
+                    sa_pub2022,
+                    sa_urban_area_name,
+                    county_english,
+                    total_population,
+                    total_households,
+                    avg_household_size,
+                    apartment_pct,
+                    owner_occupied_pct,
+                    rented_pct,
+                    vacancy_rate,
+                    employment_rate,
+                    third_level_pct,
+                    wfh_pct,
+                    population_density,
+                    avg_rooms,
+                    health_good_pct,
+                    built_pre_1919,
+                    built_2016_plus,
+                    area_sqm,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM census_small_areas
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                  AND total_population IS NOT NULL
+                LIMIT 2000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        (
+            fid, sa_code, urban_area, county, pop, households, hh_size,
+            apt_pct, owner_pct, rent_pct, vac_rate, emp_rate, edu_pct,
+            wfh, pop_density, avg_rooms, health_pct,
+            pre_1919, post_2016, area_sqm, geometry,
+        ) = row
+        features.append(
+            {
+                "type": "Feature",
+                "id": fid,
+                "geometry": geometry,
+                "properties": {
+                    "id": fid,
+                    "sa_code": sa_code,
+                    "urban_area": urban_area,
+                    "county": county,
+                    "total_population": pop,
+                    "total_households": households,
+                    "avg_household_size": float(hh_size) if hh_size else None,
+                    "apartment_pct": float(apt_pct) if apt_pct else None,
+                    "owner_occupied_pct": float(owner_pct) if owner_pct else None,
+                    "rented_pct": float(rent_pct) if rent_pct else None,
+                    "vacancy_rate": float(vac_rate) if vac_rate else None,
+                    "employment_rate": float(emp_rate) if emp_rate else None,
+                    "third_level_pct": float(edu_pct) if edu_pct else None,
+                    "wfh_pct": float(wfh) if wfh else None,
+                    "population_density": float(pop_density) if pop_density else None,
+                    "avg_rooms": float(avg_rooms) if avg_rooms else None,
+                    "health_good_pct": float(health_pct) if health_pct else None,
+                    "built_pre_1919": pre_1919,
+                    "built_2016_plus": post_2016,
+                    "area_sqm": round(area_sqm, 1) if area_sqm else None,
+                },
+            }
+        )
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
+@app.get("/api/urban_areas")
+def get_urban_areas(bbox: str = Query(..., description="west,south,east,north")):
+    """Return Urban Area boundary polygons as GeoJSON."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    ogc_fid AS id,
+                    urban_area_name,
+                    urban_area_code,
+                    county,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM urban_areas
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 500
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        fid, name, code, county, geometry = row
+        features.append(
+            {
+                "type": "Feature",
+                "id": fid,
+                "geometry": geometry,
+                "properties": {
+                    "id": fid,
+                    "urban_area_name": name,
+                    "urban_area_code": code,
+                    "county": county,
+                },
+            }
+        )
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
+@app.get("/api/census_stats")
+def get_census_stats(
+    lng: float = Query(...),
+    lat: float = Query(...),
+    radius: float = Query(500, description="Radius in metres"),
+):
+    """Return aggregated census demographics for Small Areas within a circle."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            center_sql = "ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 2157)"
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS sa_count,
+                    COALESCE(SUM(total_population), 0) AS total_pop,
+                    COALESCE(SUM(total_households), 0) AS total_hh,
+                    COALESCE(ROUND(AVG(avg_household_size)::numeric, 2), 0) AS avg_hh_size,
+                    COALESCE(ROUND(AVG(apartment_pct)::numeric, 1), 0) AS avg_apt_pct,
+                    COALESCE(ROUND(AVG(owner_occupied_pct)::numeric, 1), 0) AS avg_owner_pct,
+                    COALESCE(ROUND(AVG(rented_pct)::numeric, 1), 0) AS avg_rented_pct,
+                    COALESCE(ROUND(AVG(vacancy_rate)::numeric, 1), 0) AS avg_vacancy,
+                    COALESCE(ROUND(AVG(employment_rate)::numeric, 1), 0) AS avg_employment,
+                    COALESCE(ROUND(AVG(third_level_pct)::numeric, 1), 0) AS avg_edu,
+                    COALESCE(ROUND(AVG(wfh_pct)::numeric, 1), 0) AS avg_wfh,
+                    COALESCE(ROUND(AVG(population_density)::numeric, 0), 0) AS avg_density,
+                    COALESCE(ROUND(AVG(avg_rooms)::numeric, 1), 0) AS avg_rooms,
+                    COALESCE(SUM(age_0_14), 0) AS age_0_14,
+                    COALESCE(SUM(age_15_24), 0) AS age_15_24,
+                    COALESCE(SUM(age_25_44), 0) AS age_25_44,
+                    COALESCE(SUM(age_45_64), 0) AS age_45_64,
+                    COALESCE(SUM(age_65_plus), 0) AS age_65_plus
+                FROM census_small_areas
+                WHERE ST_DWithin(
+                    ST_Transform(geom, 2157),
+                    {center_sql},
+                    %s
+                )
+                AND total_population IS NOT NULL
+                AND total_population > 0
+                """,
+                (lng, lat, radius),
+            )
+            row = cur.fetchone()
+    finally:
+        put_conn(conn)
+
+    (
+        sa_count, total_pop, total_hh, avg_hh_size, avg_apt_pct,
+        avg_owner_pct, avg_rented_pct, avg_vacancy, avg_employment,
+        avg_edu, avg_wfh, avg_density, avg_rooms,
+        age_0_14, age_15_24, age_25_44, age_45_64, age_65_plus,
+    ) = row
+
+    return {
+        "center": {"lng": lng, "lat": lat},
+        "radius_m": radius,
+        "small_area_count": sa_count,
+        "total_population": int(total_pop),
+        "total_households": int(total_hh),
+        "avg_household_size": float(avg_hh_size),
+        "avg_apartment_pct": float(avg_apt_pct),
+        "avg_owner_occupied_pct": float(avg_owner_pct),
+        "avg_rented_pct": float(avg_rented_pct),
+        "avg_vacancy_rate": float(avg_vacancy),
+        "avg_employment_rate": float(avg_employment),
+        "avg_third_level_pct": float(avg_edu),
+        "avg_wfh_pct": float(avg_wfh),
+        "avg_population_density": float(avg_density),
+        "avg_rooms": float(avg_rooms),
+        "age_profile": {
+            "0-14": int(age_0_14),
+            "15-24": int(age_15_24),
+            "25-44": int(age_25_44),
+            "45-64": int(age_45_64),
+            "65+": int(age_65_plus),
+        },
+    }
+
+
 def query_planning_apps_bbox(table: str, west, south, east, north):
     conn = get_conn()
     try:
@@ -563,6 +779,7 @@ def health():
 ALLOWED_TABLES = {
     "sold_properties", "cadastral_freehold", "cadastral_leasehold",
     "rzlt", "dlr_planning_polygons", "dlr_planning_points",
+    "census_small_areas", "urban_areas",
 }
 
 SQL_BLOCKLIST = re.compile(
@@ -626,6 +843,50 @@ TABLE: dlr_planning_polygons (planning applications in Dún Laoghaire-Rathdown �
   geom GEOMETRY(Polygon, 4326)
 
 TABLE: dlr_planning_points (same columns as dlr_planning_polygons but geom is Point)
+
+TABLE: census_small_areas (Census 2022 demographics by Small Area — ~4600 Dublin rows, geom is Polygon)
+  ogc_fid SERIAL PRIMARY KEY
+  sa_pub2022 TEXT              -- Small Area code (join key)
+  sa_urban_area_name TEXT      -- Urban area name (e.g. 'Dublin City')
+  county_english TEXT          -- County name
+  total_population INTEGER     -- Total persons in the Small Area
+  male_population INTEGER
+  female_population INTEGER
+  population_density DOUBLE PRECISION  -- persons per km²
+  age_0_14 INTEGER, age_15_24 INTEGER, age_25_44 INTEGER, age_45_64 INTEGER, age_65_plus INTEGER
+  total_households INTEGER
+  avg_household_size DOUBLE PRECISION
+  houses INTEGER               -- count of houses/bungalows
+  apartments INTEGER           -- count of flats/apartments/bedsits
+  apartment_pct DOUBLE PRECISION
+  built_pre_1919 INTEGER, built_1919_1945 INTEGER, built_1946_1970 INTEGER
+  built_1971_2000 INTEGER, built_2001_2015 INTEGER, built_2016_plus INTEGER
+  owner_occupied INTEGER
+  rented_total INTEGER
+  owner_occupied_pct DOUBLE PRECISION  -- % owner-occupied (0-100)
+  rented_pct DOUBLE PRECISION          -- % rented (0-100)
+  avg_rooms DOUBLE PRECISION
+  vacancy_rate DOUBLE PRECISION        -- % vacant dwellings (0-100)
+  employed INTEGER, unemployed INTEGER
+  employment_rate DOUBLE PRECISION     -- % employed of labour force (0-100)
+  third_level_total INTEGER
+  third_level_pct DOUBLE PRECISION     -- % with third-level education (0-100)
+  work_from_home INTEGER, car_commuters INTEGER, public_transport_commuters INTEGER
+  wfh_pct DOUBLE PRECISION             -- % working from home (0-100)
+  health_very_good INTEGER, health_good INTEGER
+  health_good_pct DOUBLE PRECISION     -- % in good/very good health (0-100)
+  area_sqm DOUBLE PRECISION
+  geom GEOMETRY(Polygon, 4326)
+  -- SPATIAL INDEX on geom. Use spatial filters for efficient queries.
+  -- KEY USE: Cross-reference with other tables to enrich site analysis with demographics.
+  -- Example: Find RZLT sites in areas with high vacancy rates, or parcels in high-density young-professional areas.
+
+TABLE: urban_areas (Urban area boundary polygons — ~11 Dublin rows, geom is Polygon)
+  ogc_fid SERIAL PRIMARY KEY
+  urban_area_name TEXT         -- e.g. 'Dublin City', 'Swords', 'Bray'
+  urban_area_code TEXT
+  county TEXT
+  geom GEOMETRY(Polygon, 4326)
 
 COORDINATE SYSTEMS:
 - All geometries stored in EPSG:4326 (WGS84)

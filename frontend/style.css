@@ -1122,3 +1122,71 @@ body {
   50% { box-shadow: 0 0 0 12px rgba(245,158,11,0); }
   100% { box-shadow: 0 2px 12px rgba(245,158,11,0.5); }
 }
+
+/* ── Census demographics styles ───────────────────────────────────────────── */
+.census-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #00bcd4;
+  margin: 8px 0 4px 0;
+}
+
+.tenure-bar {
+  display: flex;
+  height: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 4px 0 6px 0;
+  background: #333;
+}
+
+.tenure-segment {
+  transition: width 0.3s ease;
+  min-width: 1px;
+}
+.tenure-segment.owner { background: #4caf50; }
+.tenure-segment.rented { background: #ff9800; }
+.tenure-segment.other { background: #555; }
+
+.tenure-legend {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: #aaa;
+  margin-bottom: 8px;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 3px;
+  vertical-align: middle;
+}
+.legend-dot.owner { background: #4caf50; }
+.legend-dot.rented { background: #ff9800; }
+
+.age-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 5px;
+  overflow: hidden;
+  margin: 4px 0 4px 0;
+  background: #333;
+}
+
+.age-segment {
+  transition: width 0.3s ease;
+  min-width: 1px;
+}
+
+.age-legend {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  color: #888;
+  margin-bottom: 8px;
+}
