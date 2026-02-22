@@ -572,14 +572,9 @@ SQL_BLOCKLIST = re.compile(
 
 # ── Phase 1: Hypothesis Generation Prompt ────────────────────────────────────
 
-HYPOTHESIS_PROMPT = """You are LandOS AI, an expert Dublin property & land development analyst.
-The user is a property developer. They ask questions. You answer them by forming hypotheses and writing SQL to test them.
+DB_SCHEMA_PROMPT = """DATABASE SCHEMA (PostgreSQL 16 + PostGIS 3.4):
 
-YOUR TASK: Given the user's question, form 3-5 distinct hypotheses about where opportunities might exist, and write PostGIS SQL to test each one.
-
-DATABASE SCHEMA (PostgreSQL 16 + PostGIS 3.4):
-
-TABLE: sold_properties (residential sales — ~50k rows)
+TABLE: sold_properties (residential sales — ~50k rows, geom is Point)
   id SERIAL PRIMARY KEY
   address TEXT
   sale_price NUMERIC          -- sale price in €, can be 0 (exclude these)
@@ -594,7 +589,7 @@ TABLE: sold_properties (residential sales — ~50k rows)
   url TEXT
   geom GEOMETRY(Point, 4326)
 
-TABLE: cadastral_freehold (land ownership parcels — ~2M rows, LARGE)
+TABLE: cadastral_freehold (land ownership parcels — ~2M rows, LARGE, geom is Polygon)
   ogc_fid SERIAL PRIMARY KEY
   nationalcadastralreference TEXT
   gml_id TEXT
@@ -602,11 +597,11 @@ TABLE: cadastral_freehold (land ownership parcels — ~2M rows, LARGE)
   geom GEOMETRY(Polygon, 4326)
   -- SPATIAL INDEX on geom. ALWAYS use spatial filter (ST_MakeEnvelope or ST_DWithin) to avoid full table scans.
 
-TABLE: cadastral_leasehold (leasehold parcels — ~200k rows)
+TABLE: cadastral_leasehold (leasehold parcels — ~200k rows, geom is Polygon)
   (same schema as cadastral_freehold)
   -- SPATIAL INDEX on geom. ALWAYS use spatial filter.
 
-TABLE: rzlt (Residential Zoned Land Tax sites — ~4k rows)
+TABLE: rzlt (Residential Zoned Land Tax sites — ~4k rows, geom is Polygon)
   ogc_fid SERIAL PRIMARY KEY
   zone_desc TEXT              -- e.g. 'Residential', 'Mixed Use'
   zone_gzt TEXT
@@ -615,7 +610,7 @@ TABLE: rzlt (Residential Zoned Land Tax sites — ~4k rows)
   local_authority_name TEXT   -- e.g. 'Dublin City Council', 'Dún Laoghaire-Rathdown'
   geom GEOMETRY(Polygon, 4326)
 
-TABLE: dlr_planning_polygons (planning applications in Dún Laoghaire-Rathdown — ~15k rows)
+TABLE: dlr_planning_polygons (planning applications in Dún Laoghaire-Rathdown — ~15k rows, geom is Polygon)
   ogc_fid SERIAL PRIMARY KEY
   plan_ref TEXT
   county TEXT
@@ -643,101 +638,118 @@ POSTGIS FUNCTIONS YOU CAN USE:
 - ST_Intersects(a.geom, b.geom) — spatial join between layers
 - ST_MakeEnvelope(xmin, ymin, xmax, ymax, 4326) — bounding box
 - ST_Centroid(geom) — centroid point of a polygon
-- ST_X(point), ST_Y(point) — extract coordinates
+- ST_X(point), ST_Y(point) — extract coordinates from a POINT geometry
 - ST_AsGeoJSON(geom)::json — geometry as GeoJSON for frontend
-- ST_SnapToGrid(geom, size) — grid-based spatial aggregation
-- ST_Buffer(geom::geography, distance_metres)::geometry — buffer around a geometry
+- ST_Buffer(geom::geography, distance_metres)::geometry — buffer around a geometry"""
 
-SQL RULES:
-- ALWAYS include in your SELECT: ST_AsGeoJSON(geom)::json AS geometry, ST_X(ST_Centroid(geom)) AS lng, ST_Y(ST_Centroid(geom)) AS lat (use ST_X(geom)/ST_Y(geom) for point tables)
-- For cadastral tables (2M+ rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
-- LIMIT each query to 25 rows max
-- Use CTEs for readability
-- Use NULLIF to avoid division by zero
-- Exclude sale_price <= 0 from sold_properties
-- You CAN use aggregations, window functions, CASE expressions, subqueries
-- You CAN join across tables using spatial operations (ST_DWithin, ST_Intersects)
-- Write production-quality SQL — handle NULLs, edge cases, use appropriate types
+HYPOTHESIS_PROMPT = f"""You are LandOS AI, an expert Dublin property & land development analyst.
+The user is a property developer. They ask questions. You answer them by forming hypotheses and writing SQL to test them.
+
+YOUR TASK: Given the user's question, form 3-5 distinct hypotheses about where opportunities might exist, and write PostGIS SQL to test each one.
+
+{DB_SCHEMA_PROMPT}
+
+CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
+
+1. GEOMETRY COLUMNS: Every query MUST include these 3 columns:
+   - ST_AsGeoJSON(tablename.geom)::json AS geometry
+   - For POLYGON tables (cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons):
+       ST_X(ST_Centroid(tablename.geom)) AS lng, ST_Y(ST_Centroid(tablename.geom)) AS lat
+   - For POINT tables (sold_properties, dlr_planning_points):
+       ST_X(tablename.geom) AS lng, ST_Y(tablename.geom) AS lat
+   NOTE: ST_X() and ST_Y() ONLY work on Point geometries. NEVER call ST_X(polygon.geom) — use ST_X(ST_Centroid(polygon.geom)) instead.
+
+2. CADASTRAL TABLES (2M+ rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
+
+3. LIMIT each query to 25 rows max.
+
+4. ALWAYS use NULLIF(x, 0) to prevent division by zero: e.g. sale_price / NULLIF(floor_area_m2, 0)
+
+5. ALWAYS filter: sale_price > 0 on sold_properties.
+
+6. NEVER use column aliases in WHERE/HAVING — repeat the expression or use a CTE/subquery.
+
+7. When using CTEs that join tables, always qualify ambiguous column names with the table alias.
+
+8. For ST_DWithin with metre distances, cast to geography: ST_DWithin(a.geom::geography, b.geom::geography, 500)
+
+9. NEVER use GROUP BY with geometry columns directly. Instead, use a subquery or CTE to aggregate first, then join back to get geometry.
+
+10. For cross-table spatial queries, prefer ST_DWithin over ST_Intersects for point-to-polygon distance queries.
 
 HYPOTHESIS GUIDELINES:
 - Each hypothesis should test a DIFFERENT angle on the user's question
 - At least one hypothesis should cross-reference 2+ tables (e.g. RZLT sites near underpriced sales)
 - At least one hypothesis should use aggregation/statistics (e.g. avg price per sqm by area)
 - Hypotheses should be specific and testable, not vague
-- The rationale should explain the developer logic: WHY would this signal matter?
 - If no location is specified, pick 2-3 promising Dublin areas or search city-wide
 
 RESPONSE FORMAT (valid JSON only, no markdown):
-{
+{{
   "hypotheses": [
-    {
+    {{
       "name": "Short hypothesis name (5-8 words)",
-      "rationale": "2-3 sentences explaining the developer logic. Why would this signal indicate an opportunity? What would a smart developer look for here?",
+      "rationale": "2-3 sentences explaining the developer logic.",
       "sql_queries": [
-        {
+        {{
           "description": "What this specific query tests",
           "sql": "SELECT ... full PostGIS SQL here ..."
-        }
+        }}
       ]
-    }
+    }}
   ]
-}
+}}
 """
 
-# ── Phase 2: Evaluation Prompt ───────────────────────────────────────────────
+# ── Phase 2: Evaluation Prompt (outputs flat ranked results) ──────────────────
 
-EVALUATION_PROMPT_TEMPLATE = """You are LandOS AI evaluating hypothesis results for a property developer.
+EVALUATION_PROMPT_TEMPLATE = """You are LandOS AI, a Dublin property intelligence system. You just ran multiple analysis queries for a property developer.
 
 ORIGINAL QUESTION: {user_query}
 
-I formed hypotheses and ran SQL queries against the Dublin property database. Here are the results:
+Here are the query results from different analytical angles:
 
 {hypothesis_results}
 
-YOUR TASK: Evaluate which hypotheses produced the strongest development opportunity signals. Then select the best individual properties/sites across all hypotheses.
+YOUR TASK: Pick the BEST 8-15 sites across ALL queries and rank them. The developer just wants to see the top opportunities on a map — no theory, no hypotheses, just results.
 
-EVALUATION CRITERIA:
-- Signal strength: Did the data actually show what the hypothesis predicted?
-- Opportunity quality: Are these actionable for a developer (not just interesting stats)?
-- Cross-reference value: Do multiple data layers reinforce the same signal?
-- A hypothesis with 0 results is "weak" — the signal doesn't exist in the data
-- A hypothesis with results that don't show a clear pattern is "moderate"
-- A hypothesis with clear, actionable results where the numbers tell a story is "strong"
+RANKING CRITERIA (in order of importance):
+1. Actionability — can a developer actually do something with this site?
+2. Signal strength — does the data clearly show an opportunity (underpriced, large parcel, RZLT pressure, etc.)?
+3. Cross-reference value — sites that appear in multiple queries or combine multiple signals rank higher.
+4. Specificity — a specific site with an address beats an aggregated statistic.
 
 RESPONSE FORMAT (valid JSON only, no markdown):
 {{
   "type": "explore",
-  "title": "Analysis title (max 8 words)",
-  "summary": "2-3 sentence summary. Lead with the strongest opportunity found. Be specific — mention the area, the price range, the signal. This is what the developer reads first.",
-  "hypotheses": [
+  "title": "Short punchy title (max 8 words)",
+  "summary": "2-3 sentences. Lead with the best finding. Be specific: mention the area, price, size, or signal. This is what the developer reads first.",
+  "sites": [
     {{
-      "name": "Hypothesis name (must match input)",
-      "status": "strong|moderate|weak",
-      "verdict": "1-2 sentences: what the data showed. If strong, explain the opportunity. If weak, explain why the signal wasn't there."
+      "hypothesis_index": 0,
+      "query_index": 0,
+      "row_index": 0,
+      "score": 85,
+      "reason": "One sentence: why this site is an opportunity."
     }}
-  ],
-  "selected_results": {{
-    "hypothesis_index": <0-based index of the hypothesis>,
-    "query_index": <0-based index of the query within that hypothesis>,
-    "row_indices": [<0-based indices of the best rows from that query's results>]
-  }},
-  "result_annotations": [
-    "Why this specific property/site is an opportunity (1 sentence each, in order matching the selected rows)"
   ],
   "follow_ups": [
     {{
       "label": "Short label (max 6 words)",
-      "prompt": "Full follow-up question to ask",
-      "reason": "Why this follow-up would be valuable"
+      "prompt": "Full follow-up question to ask"
     }}
   ]
 }}
 
-IMPORTANT:
-- selected_results should pick from the STRONGEST hypothesis. Pick 5-15 of the best individual results.
-- result_annotations must have exactly one entry per selected row, in the same order.
-- follow_ups should have exactly 3 entries: one that zooms into the best finding, one that compares areas, one that explores a different angle.
-- If ALL hypotheses are weak, say so honestly in the summary and suggest what the developer should ask instead.
+RULES:
+- "sites" must contain 8-15 entries, ranked best-first.
+- hypothesis_index / query_index / row_index are 0-based indices into the input data.
+- ONLY select rows that have actual site data (geometry, address, or parcel ref). Skip aggregate-only rows.
+- Skip rows from queries that returned errors.
+- "score" is 0-100 representing opportunity strength: 90+ = exceptional, 70-89 = strong, 50-69 = moderate, below 50 = weak. Score based on: size of opportunity, data confidence, actionability.
+- "reason" should be developer-actionable: mention price, area, tax pressure, planning status etc.
+- "follow_ups" should have exactly 3 entries.
+- If no queries returned useful results, set sites to [] and explain in summary what the developer should try instead.
 """
 
 
@@ -827,29 +839,52 @@ def execute_hypothesis_sql(sql: str) -> dict:
     if error:
         return {"rows": [], "error": error, "row_count": 0}
 
+    # Strip trailing semicolons (common Gemini output that breaks subquery wrapping)
+    clean_sql = sql.strip().rstrip(";")
+
     # Wrap with row limit
-    wrapped_sql = f"SELECT * FROM ({sql}) AS _hypothesis_result LIMIT 25"
+    wrapped_sql = f"SELECT * FROM ({clean_sql}) AS _hypothesis_result LIMIT 25"
 
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = '8s'")
+            cur.execute("SET statement_timeout = '10s'")
             cur.execute("BEGIN READ ONLY")
             try:
                 cur.execute(wrapped_sql)
                 columns = [desc[0] for desc in cur.description]
                 raw_rows = cur.fetchall()
-            finally:
-                cur.execute("ROLLBACK")  # end the read-only transaction
+            except Exception as e:
+                cur.execute("ROLLBACK")
                 cur.execute("RESET statement_timeout")
+                # Try executing without wrapper (some CTEs don't wrap well)
+                try:
+                    cur.execute("BEGIN READ ONLY")
+                    limited_sql = clean_sql
+                    if "LIMIT" not in clean_sql.upper()[-30:]:
+                        limited_sql = clean_sql + " LIMIT 25"
+                    cur.execute(limited_sql)
+                    columns = [desc[0] for desc in cur.description]
+                    raw_rows = cur.fetchall()
+                except Exception as e2:
+                    cur.execute("ROLLBACK")
+                    cur.execute("RESET statement_timeout")
+                    put_conn(conn)
+                    return {"rows": [], "error": str(e2)[:300], "row_count": 0}
+            finally:
+                try:
+                    cur.execute("ROLLBACK")
+                    cur.execute("RESET statement_timeout")
+                except Exception:
+                    pass
     except Exception as e:
-        put_conn(conn)
-        return {"rows": [], "error": str(e)[:200], "row_count": 0}
-    finally:
         try:
             put_conn(conn)
         except Exception:
             pass
+        return {"rows": [], "error": str(e)[:300], "row_count": 0}
+
+    put_conn(conn)
 
     # Process rows into dicts
     rows = []
@@ -887,30 +922,29 @@ async def generate_hypotheses(messages: list[ChatMessage]) -> list[dict]:
 
 
 async def evaluate_hypotheses(user_query: str, hypotheses: list[dict]) -> dict:
-    """Phase 3: Ask Gemini to evaluate results and pick the best opportunities."""
+    """Phase 3: Ask Gemini to rank the best sites across all hypotheses into a flat list."""
     # Build the hypothesis results summary for the evaluation prompt
     parts = []
     for i, h in enumerate(hypotheses):
-        parts.append(f"## Hypothesis {i+1}: {h['name']}")
+        parts.append(f"## Analysis {i} (hypothesis_index={i}): {h['name']}")
         parts.append(f"Rationale: {h['rationale']}")
         for j, q in enumerate(h.get("sql_queries", [])):
             result = q.get("result", {})
             row_count = result.get("row_count", 0)
             error = result.get("error")
-            parts.append(f"\nQuery {j+1}: {q.get('description', 'unnamed')}")
+            parts.append(f"\nQuery {j} (query_index={j}): {q.get('description', 'unnamed')}")
             if error:
                 parts.append(f"ERROR: {error}")
             elif row_count == 0:
                 parts.append("No results returned.")
             else:
-                # Include first few rows as a sample
                 rows = result.get("rows", [])
-                # Summarize: show all rows but trim geometry for brevity
                 summarized = []
-                for row in rows:
+                for row_idx, row in enumerate(rows):
                     summary_row = {k: v for k, v in row.items() if k != "geometry"}
+                    summary_row["_row_index"] = row_idx
                     summarized.append(summary_row)
-                parts.append(f"Results ({row_count} rows):")
+                parts.append(f"Results ({row_count} rows, row_index 0..{row_count-1}):")
                 parts.append(json.dumps(summarized, indent=2, default=str)[:3000])
         parts.append("")
 
@@ -921,69 +955,112 @@ async def evaluate_hypotheses(user_query: str, hypotheses: list[dict]) -> dict:
         hypothesis_results=hypothesis_results_text,
     )
 
-    eval_messages = [{"role": "user", "content": "Evaluate these hypothesis results and select the best opportunities."}]
+    eval_messages = [{"role": "user", "content": "Rank the best sites from these results."}]
     result = await call_gemini_with_prompt(eval_prompt, eval_messages, max_tokens=4096)
 
     return result
 
 
-def build_final_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
-    """Extract the selected result rows and attach annotations + _table field."""
-    selected = evaluation.get("selected_results", {})
-    annotations = evaluation.get("result_annotations", [])
+def infer_table(row: dict) -> str:
+    """Infer the source table from row columns."""
+    if "address" in row and "sale_price" in row:
+        return "sold_properties"
+    elif "zone_desc" in row or "site_area" in row:
+        return "rzlt"
+    elif "plan_ref" in row or "decision" in row:
+        return "dlr_planning_polygons"
+    elif "nationalcadastralreference" in row or ("area_sqm" in row and "address" not in row):
+        return "cadastral_freehold"
+    return "unknown"
 
-    h_idx = selected.get("hypothesis_index", 0)
-    q_idx = selected.get("query_index", 0)
-    row_indices = selected.get("row_indices", [])
 
-    # Get the actual rows from the hypothesis results
-    try:
-        hypothesis = hypotheses[h_idx]
-        query = hypothesis["sql_queries"][q_idx]
-        all_rows = query.get("result", {}).get("rows", [])
-    except (IndexError, KeyError):
-        # Fallback: gather all rows from all hypotheses
-        all_rows = []
+def extract_coords_from_geometry(row: dict):
+    """If row has geometry but no lng/lat, extract coordinates from the GeoJSON geometry."""
+    if row.get("lng") and row.get("lat"):
+        return  # already has coords
+    geom = row.get("geometry")
+    if not geom or not isinstance(geom, dict):
+        return
+    geom_type = geom.get("type", "")
+    coords = geom.get("coordinates")
+    if not coords:
+        return
+    if geom_type == "Point":
+        row["lng"] = coords[0]
+        row["lat"] = coords[1]
+    elif geom_type in ("Polygon", "MultiPolygon"):
+        # Use centroid approximation: average of first ring
+        ring = coords[0] if geom_type == "Polygon" else coords[0][0]
+        if ring:
+            row["lng"] = sum(c[0] for c in ring) / len(ring)
+            row["lat"] = sum(c[1] for c in ring) / len(ring)
+
+
+def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
+    """Build a flat ranked list of sites from the evaluation's site picks."""
+    site_picks = evaluation.get("sites", [])
+    results = []
+
+    for rank, pick in enumerate(site_picks):
+        h_idx = pick.get("hypothesis_index", 0)
+        q_idx = pick.get("query_index", 0)
+        r_idx = pick.get("row_index", 0)
+        reason = pick.get("reason", "")
+        score = pick.get("score", 0)
+
+        try:
+            query = hypotheses[h_idx]["sql_queries"][q_idx]
+            all_rows = query.get("result", {}).get("rows", [])
+            if r_idx >= len(all_rows):
+                continue
+            row = dict(all_rows[r_idx])
+        except (IndexError, KeyError):
+            continue
+
+        # Extract lng/lat from geometry if not present as columns
+        extract_coords_from_geometry(row)
+
+        # Skip rows without any spatial data
+        if not row.get("lng") and not row.get("lat"):
+            continue
+
+        row["opportunity_reason"] = reason
+        row["_score"] = score
+        row["_table"] = infer_table(row)
+        row["_rank"] = rank
+        results.append(row)
+
+    # Fallback: if evaluation didn't pick sites, gather the best from each hypothesis
+    if not results:
         for h in hypotheses:
             for q in h.get("sql_queries", []):
                 rows = q.get("result", {}).get("rows", [])
-                all_rows.extend(rows)
-        row_indices = list(range(min(len(all_rows), 15)))
-
-    results = []
-    for i, row_idx in enumerate(row_indices):
-        if row_idx >= len(all_rows):
-            continue
-        row = dict(all_rows[row_idx])  # copy
-
-        # Add opportunity_reason from annotations
-        if i < len(annotations):
-            row["opportunity_reason"] = annotations[i]
-
-        # Determine _table from context
-        if "address" in row and "sale_price" in row:
-            row["_table"] = "sold_properties"
-        elif "zone_desc" in row or "site_area" in row:
-            row["_table"] = "rzlt"
-        elif "plan_ref" in row or "decision" in row:
-            row["_table"] = "dlr_planning_polygons"
-        elif "national_ref" in row or "area_sqm" in row:
-            row["_table"] = "cadastral_freehold"
-        else:
-            row["_table"] = "unknown"
-
-        results.append(row)
+                for r_idx, row in enumerate(rows[:5]):
+                    row = dict(row)
+                    extract_coords_from_geometry(row)
+                    if not row.get("lng") and not row.get("lat"):
+                        continue
+                    row["_table"] = infer_table(row)
+                    row["_rank"] = len(results)
+                    row["_score"] = 50  # default for fallback
+                    results.append(row)
+                    if len(results) >= 15:
+                        break
+                if len(results) >= 15:
+                    break
+            if len(results) >= 15:
+                break
 
     return results
 
 
 @app.post("/api/ai/chat")
 async def ai_chat(req: ChatRequest):
-    """AI-powered property analytics chat with hypothesis-driven explore pipeline.
+    """AI-powered property analytics chat.
 
     Phase 1: Gemini forms 3-5 hypotheses and writes SQL for each.
     Phase 2: Execute all SQL queries safely against PostGIS.
-    Phase 3: Gemini evaluates results, ranks hypotheses, picks best properties.
+    Phase 3: Gemini ranks the best sites into a flat list for the map.
     """
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
@@ -1000,21 +1077,31 @@ async def ai_chat(req: ChatRequest):
 
     # Phase 2: Execute all SQL queries safely
     total_queries = 0
+    successful_queries = 0
     for hypothesis in hypotheses:
         for query in hypothesis.get("sql_queries", []):
             sql = query.get("sql", "")
             if sql.strip():
                 query["result"] = execute_hypothesis_sql(sql)
                 total_queries += 1
+                if not query["result"].get("error"):
+                    successful_queries += 1
 
-    # Phase 3: Evaluate results, rank hypotheses, pick best properties
+    # Phase 3: Evaluate results and rank best sites
     evaluation = await evaluate_hypotheses(user_query, hypotheses)
 
-    # Build the final results array with geometry for the frontend map
-    evaluation["results"] = build_final_results(hypotheses, evaluation)
+    # Build the flat results array with geometry for the frontend map
+    results = build_flat_results(hypotheses, evaluation)
 
-    # Ensure type is set
-    if "type" not in evaluation:
-        evaluation["type"] = "explore"
-
-    return evaluation
+    # Return clean response (no hypotheses exposed to frontend)
+    return {
+        "type": "explore",
+        "title": evaluation.get("title", "Analysis Results"),
+        "summary": evaluation.get("summary", "Analysis complete."),
+        "results": results,
+        "follow_ups": evaluation.get("follow_ups", []),
+        "query_stats": {
+            "total": total_queries,
+            "successful": successful_queries,
+        },
+    }

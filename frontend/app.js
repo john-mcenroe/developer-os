@@ -7,6 +7,10 @@ let circleCenter = null;  // { lng, lat }
 let circleRadiusM = 500;  // metres
 let circleDrawing = false;  // true while dragging to define radius
 
+// ── Panel state ──────────────────────────────────────────────────────────────
+let mapCollapsed = false;
+let savedMapWidth = 75; // percentage
+
 // ── Map initialisation ───────────────────────────────────────────────────────
 const map = new maplibregl.Map({
   container: "map",
@@ -113,6 +117,7 @@ map.on("load", () => {
     id: "rzlt-fill",
     type: "fill",
     source: "rzlt",
+    layout: { visibility: "none" },
     paint: {
       "fill-color": "rgba(255, 0, 0, 0.2)",
       "fill-outline-color": "rgba(255, 0, 0, 0)",
@@ -123,6 +128,7 @@ map.on("load", () => {
     id: "rzlt-outline",
     type: "line",
     source: "rzlt",
+    layout: { visibility: "none" },
     paint: {
       "line-color": "#ff0000",
       "line-width": 2,
@@ -386,11 +392,11 @@ function setupParcelClick(fillLayerId, selectedLayerId, parcelType) {
     map.setFilter("cadastral_leasehold-selected", ["==", ["id"], -1]);
     map.setFilter(selectedLayerId, ["==", ["id"], id]);
 
-    // Fetch full details and open sidebar
+    // Fetch full details and open flyout
     fetch(`${API}/parcel/${id}?parcel_type=${parcelType}`)
       .then((r) => r.json())
-      .then((data) => showSidebar(data))
-      .catch(() => showSidebar(props));
+      .then((data) => showParcelFlyout(data))
+      .catch(() => showParcelFlyout(props));
   });
 
   map.on("mouseenter", fillLayerId, () => {
@@ -417,7 +423,7 @@ function setupPlanningClick(fillLayerId, selectedLayerId) {
       map.setFilter(selectedLayerId, ["==", ["id"], id]);
     }
 
-    showPlanningSidebar(props);
+    showPlanningFlyout(props);
   });
 
   map.on("mouseenter", fillLayerId, () => {
@@ -442,7 +448,7 @@ function setupSoldPropertyClick() {
       map.setFilter("dlr_planning_polygons-selected", ["==", ["id"], -1]);
     }
 
-    showSoldSidebar(props);
+    showSoldFlyout(props);
   });
 
   map.on("mouseenter", "sold_properties-fill", () => {
@@ -461,15 +467,46 @@ map.on("load", () => {
   setupSoldPropertyClick();
 });
 
-// ── Sidebar ──────────────────────────────────────────────────────────────────
-function showSidebar(data) {
-  const content = document.getElementById("sidebar-content");
+// ── Flyout Panel ─────────────────────────────────────────────────────────────
+const flyoutPanel = document.getElementById("flyout-panel");
+const flyoutContent = document.getElementById("flyout-content");
+const flyoutTitle = document.getElementById("flyout-title");
+
+function openFlyout(title) {
+  flyoutTitle.textContent = title || "Detail";
+  flyoutPanel.classList.add("open");
+}
+
+function closeFlyout() {
+  flyoutPanel.classList.remove("open");
+  map.setFilter("cadastral_freehold-selected", ["==", ["id"], -1]);
+  map.setFilter("cadastral_leasehold-selected", ["==", ["id"], -1]);
+  if (map.getLayer("dlr_planning_polygons-selected")) {
+    map.setFilter("dlr_planning_polygons-selected", ["==", ["id"], -1]);
+  }
+}
+
+document.getElementById("flyout-close").addEventListener("click", closeFlyout);
+
+document.getElementById("flyout-back").addEventListener("click", () => {
+  closeFlyout();
+  document.getElementById("ai-input").focus();
+});
+
+// Escape closes flyout
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && flyoutPanel.classList.contains("open")) {
+    closeFlyout();
+  }
+});
+
+function showParcelFlyout(data) {
   const areaSqm = data.area_sqm ? data.area_sqm.toLocaleString() : "—";
   const areaAcres = data.area_acres != null ? data.area_acres : "—";
   const typeLabel = (data.type || "freehold").charAt(0).toUpperCase() + (data.type || "freehold").slice(1);
   const typeColor = data.type === "leasehold" ? "#6495ed" : "#ff8c00";
 
-  content.innerHTML = `
+  flyoutContent.innerHTML = `
     <div class="detail-row">
       <div class="detail-label">Area</div>
       <div class="detail-value large">${areaSqm} m²</div>
@@ -497,13 +534,10 @@ function showSidebar(data) {
     </div>
   `;
 
-  document.getElementById("sidebar").classList.add("open");
+  openFlyout("Parcel Detail");
 }
 
-function showPlanningSidebar(data) {
-  const content = document.getElementById("sidebar-content");
-
-  // Format date from YYYYMMDD to readable
+function showPlanningFlyout(data) {
   function fmtDate(d) {
     if (!d || d === "(null)" || d.length < 8) return "—";
     return `${d.slice(6, 8)}/${d.slice(4, 6)}/${d.slice(0, 4)}`;
@@ -520,7 +554,7 @@ function showPlanningSidebar(data) {
     ? `<a href="${data.more_info}" target="_blank" rel="noopener" style="color:#3498db;word-break:break-all;">View on DLR</a>`
     : "—";
 
-  content.innerHTML = `
+  flyoutContent.innerHTML = `
     <div class="detail-row">
       <div class="detail-label">Planning Ref</div>
       <div class="detail-value large" style="color:#2ecc71">${data.plan_ref || "—"}</div>
@@ -561,12 +595,10 @@ function showPlanningSidebar(data) {
     </div>
   `;
 
-  document.getElementById("sidebar").classList.add("open");
+  openFlyout("Planning Application");
 }
 
-function showSoldSidebar(data) {
-  const content = document.getElementById("sidebar-content");
-
+function showSoldFlyout(data) {
   const salePrice = data.sale_price ? `€${Number(data.sale_price).toLocaleString()}` : "—";
   const askingPrice = data.asking_price ? `€${Number(data.asking_price).toLocaleString()}` : "—";
   const priceDelta = data.sale_price && data.asking_price
@@ -582,7 +614,7 @@ function showSoldSidebar(data) {
     ? `<a href="${data.url}" target="_blank" rel="noopener" style="color:#3498db;word-break:break-all;">View Listing</a>`
     : "—";
 
-  content.innerHTML = `
+  flyoutContent.innerHTML = `
     <div class="detail-row">
       <div class="detail-label">Sale Price</div>
       <div class="detail-value large" style="color:#e74c3c">${salePrice}</div>
@@ -634,16 +666,139 @@ function showSoldSidebar(data) {
     </div>
   `;
 
-  document.getElementById("sidebar").classList.add("open");
+  openFlyout("Sold Property");
 }
 
-document.getElementById("sidebar-close").addEventListener("click", () => {
-  document.getElementById("sidebar").classList.remove("open");
-  map.setFilter("cadastral_freehold-selected", ["==", ["id"], -1]);
-  map.setFilter("cadastral_leasehold-selected", ["==", ["id"], -1]);
-  if (map.getLayer("dlr_planning_polygons-selected")) {
-    map.setFilter("dlr_planning_polygons-selected", ["==", ["id"], -1]);
+function showRzltFlyout(data) {
+  const area = data.site_area ? `${Number(data.site_area).toLocaleString()}` : "—";
+
+  flyoutContent.innerHTML = `
+    <div class="detail-row">
+      <div class="detail-label">Zone Description</div>
+      <div class="detail-value large" style="color:#ff6b6b">${data.zone_desc || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Site Area</div>
+      <div class="detail-value">${area} m²</div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label">Zone GZT</div>
+      <div class="detail-value">${data.zone_gzt || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">GZT Description</div>
+      <div class="detail-value" style="font-size:0.85em;line-height:1.4">${data.gzt_desc || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Local Authority</div>
+      <div class="detail-value">${data.local_authority_name || "—"}</div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label" style="color:#ff6b6b">RZLT Status</div>
+      <div class="detail-value" style="color:#ff6b6b;font-size:12px;line-height:1.4">Subject to 3% annual Residential Zoned Land Tax — strong motivated seller signal</div>
+    </div>
+  `;
+
+  openFlyout("RZLT Site");
+}
+
+function showGenericFlyout(data) {
+  // Build a generic detail view from whatever properties the result has
+  const rows = [];
+  const skipKeys = new Set(["geometry", "_table", "_rank", "_score", "opportunity_reason", "lng", "lat"]);
+
+  // Show score and reason first
+  if (data._score) {
+    const scoreColor = data._score >= 80 ? "#22c55e" : data._score >= 60 ? "#f59e0b" : "#888";
+    rows.push(`<div class="detail-row"><div class="detail-label">Opportunity Score</div><div class="detail-value large" style="color:${scoreColor}">${data._score}/100</div></div>`);
   }
+  if (data.opportunity_reason) {
+    rows.push(`<div class="detail-row"><div class="detail-label">Why</div><div class="detail-value" style="color:#22c55e;font-size:12px;line-height:1.4">${data.opportunity_reason}</div></div>`);
+  }
+  if (rows.length > 0) rows.push("<hr>");
+
+  // Show all other properties
+  for (const [key, value] of Object.entries(data)) {
+    if (skipKeys.has(key) || key.startsWith("_") || value == null || value === "") continue;
+    const label = key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    let displayVal = value;
+    if (typeof value === "number") {
+      displayVal = key.includes("price") || key.includes("sale") ? `€${value.toLocaleString()}` : value.toLocaleString();
+    }
+    rows.push(`<div class="detail-row"><div class="detail-label">${label}</div><div class="detail-value">${displayVal}</div></div>`);
+  }
+
+  flyoutContent.innerHTML = rows.join("\n");
+  openFlyout("Site Detail");
+}
+
+// ── Map Panel Collapse / Expand ─────────────────────────────────────────────
+const mapPanel = document.getElementById("map-panel");
+const resizeDivider = document.getElementById("resize-divider");
+const mapCollapseBtn = document.getElementById("map-collapse-btn");
+const mapExpandBtn = document.getElementById("map-expand-btn");
+
+function toggleMapPanel() {
+  mapCollapsed = !mapCollapsed;
+
+  if (mapCollapsed) {
+    savedMapWidth = parseFloat(mapPanel.style.width) || 75;
+    mapPanel.classList.add("collapsed");
+    resizeDivider.classList.add("hidden");
+    mapCollapseBtn.style.display = "none";
+    mapExpandBtn.style.display = "inline-flex";
+  } else {
+    mapPanel.classList.remove("collapsed");
+    mapPanel.style.width = savedMapWidth + "%";
+    resizeDivider.classList.remove("hidden");
+    mapCollapseBtn.style.display = "flex";
+    mapExpandBtn.style.display = "none";
+    // MapLibre needs to know the container changed
+    setTimeout(() => map.resize(), 350);
+  }
+}
+
+mapCollapseBtn.addEventListener("click", toggleMapPanel);
+mapExpandBtn.addEventListener("click", toggleMapPanel);
+
+// Keyboard shortcut: Cmd/Ctrl+\ to toggle map
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+    e.preventDefault();
+    toggleMapPanel();
+  }
+});
+
+// ── Resize divider drag ─────────────────────────────────────────────────────
+let isDragging = false;
+
+resizeDivider.addEventListener("mousedown", (e) => {
+  e.preventDefault();
+  isDragging = true;
+  resizeDivider.classList.add("dragging");
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+});
+
+document.addEventListener("mousemove", (e) => {
+  if (!isDragging) return;
+  const appWidth = document.getElementById("app").offsetWidth;
+  const newWidth = (e.clientX / appWidth) * 100;
+  // Clamp between 20% and 80%
+  const clampedWidth = Math.max(20, Math.min(80, newWidth));
+  mapPanel.style.width = clampedWidth + "%";
+});
+
+document.addEventListener("mouseup", () => {
+  if (!isDragging) return;
+  isDragging = false;
+  resizeDivider.classList.remove("dragging");
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+  // Notify MapLibre of resize
+  map.resize();
 });
 
 // ── Search ───────────────────────────────────────────────────────────────────
@@ -818,12 +973,18 @@ function toggleCircleMode() {
 
 document.getElementById("circle-mode-btn")?.addEventListener("click", toggleCircleMode);
 
+// Layer panel expand/collapse
+const layerPanel = document.getElementById("layer-panel");
+document.getElementById("layer-toggle-btn")?.addEventListener("click", () => {
+  layerPanel?.classList.toggle("collapsed");
+});
+
 function clearCircle() {
   circleCenter = null;
   circleDrawing = false;
   const src = map.getSource("analysis-circle");
   if (src) src.setData({ type: "FeatureCollection", features: [] });
-  document.getElementById("sidebar").classList.remove("open");
+  closeFlyout();
 }
 
 // Draw circle by click-and-drag: mousedown = center, drag = radius
@@ -872,7 +1033,7 @@ function fetchCircleStats() {
     const url = `${API}/sold_stats?lng=${circleCenter.lng}&lat=${circleCenter.lat}&radius=${circleRadiusM}`;
     fetch(url)
       .then((r) => r.json())
-      .then((data) => showCircleStatsSidebar(data))
+      .then((data) => showCircleStatsFlyout(data))
       .catch((err) => console.error("Failed to fetch circle stats:", err));
   }, 200);
 }
@@ -885,21 +1046,281 @@ function onRadiusChange(val) {
 }
 
 // ── AI Assistant ─────────────────────────────────────────────────────────────
-const aiPanel = document.getElementById("ai-panel");
-const aiMessages = document.getElementById("ai-messages");
+const aiMessages = document.getElementById("chat-messages");
 const aiInput = document.getElementById("ai-input");
 const aiSendBtn = document.getElementById("ai-send");
 const aiSuggestionsEl = document.getElementById("ai-suggestions");
 const aiResultsContainer = document.getElementById("ai-results-container");
 const aiResultsList = document.getElementById("ai-results-list");
 const aiResultsCount = document.getElementById("ai-results-count");
-const aiInsightsContainer = document.getElementById("ai-insights-container");
 const aiStarterOptions = document.getElementById("ai-starter-options");
 
 let aiConversation = []; // {role, content}
 let aiMarkers = [];       // MapLibre markers on the map
 let aiActiveResultIdx = -1;
 let aiHasStarted = false; // track if user has made first query
+
+// ── Chat Session Management ─────────────────────────────────────────────────
+const CHATS_STORAGE_KEY = "landos_chats";
+let chatSessions = [];    // array of {id, title, created_at, updated_at, messages, results}
+let activeChatId = null;
+let sidebarOpen = false;
+
+function generateChatId() {
+  return "chat_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7);
+}
+
+function loadChatsFromStorage() {
+  try {
+    const raw = localStorage.getItem(CHATS_STORAGE_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      chatSessions = data.chats || [];
+      activeChatId = data.active_chat_id || null;
+    }
+  } catch (e) {
+    console.error("Failed to load chats from storage:", e);
+    chatSessions = [];
+    activeChatId = null;
+  }
+}
+
+function saveChatsToStorage() {
+  try {
+    localStorage.setItem(CHATS_STORAGE_KEY, JSON.stringify({
+      chats: chatSessions,
+      active_chat_id: activeChatId,
+    }));
+  } catch (e) {
+    console.error("Failed to save chats to storage:", e);
+  }
+}
+
+function getActiveChat() {
+  return chatSessions.find(c => c.id === activeChatId) || null;
+}
+
+function autoTitleChat(chat) {
+  if (!chat || chat.title) return;
+  const firstUserMsg = chat.messages.find(m => m.role === "user");
+  if (firstUserMsg) {
+    const text = firstUserMsg.content;
+    chat.title = text.length > 50 ? text.substring(0, 47) + "…" : text;
+  }
+}
+
+function createNewChat(skipRender) {
+  // Save current state before switching
+  syncCurrentChatState();
+
+  const chat = {
+    id: generateChatId(),
+    title: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    messages: [],
+    lastResults: null,
+  };
+  chatSessions.unshift(chat);
+  activeChatId = chat.id;
+  saveChatsToStorage();
+
+  // Reset UI
+  resetChatUI();
+
+  if (!skipRender) renderChatList();
+}
+
+function switchToChat(chatId) {
+  if (chatId === activeChatId) return;
+
+  // Save current state
+  syncCurrentChatState();
+
+  activeChatId = chatId;
+  const chat = getActiveChat();
+  if (!chat) return;
+
+  saveChatsToStorage();
+
+  // Reset UI and replay messages
+  resetChatUI();
+  replayChatMessages(chat);
+  renderChatList();
+}
+
+function deleteChat(chatId) {
+  chatSessions = chatSessions.filter(c => c.id !== chatId);
+  if (activeChatId === chatId) {
+    if (chatSessions.length > 0) {
+      activeChatId = chatSessions[0].id;
+      resetChatUI();
+      replayChatMessages(getActiveChat());
+    } else {
+      createNewChat(true);
+    }
+  }
+  saveChatsToStorage();
+  renderChatList();
+}
+
+function syncCurrentChatState() {
+  const chat = getActiveChat();
+  if (!chat) return;
+  chat.messages = [...aiConversation];
+  chat.updated_at = new Date().toISOString();
+  autoTitleChat(chat);
+  // Store last results for restoring map markers
+  if (showAiResults._currentResults) {
+    chat.lastResults = showAiResults._currentResults;
+  }
+}
+
+function resetChatUI() {
+  // Clear messages
+  aiMessages.innerHTML = `<div class="ai-msg ai-msg-assistant">
+    <div class="ai-msg-content">Explore Dublin development opportunities. Pick an analysis below or type your own query.</div>
+  </div>`;
+  aiConversation = [];
+  aiSuggestionsEl.innerHTML = "";
+  aiResultsContainer.style.display = "none";
+  aiResultsList.innerHTML = "";
+  clearAiMarkers();
+  showAiResults._currentResults = null;
+  aiActiveResultIdx = -1;
+  closeFlyout();
+
+  // Show starters again
+  aiHasStarted = false;
+  if (aiStarterOptions) {
+    aiStarterOptions.style.display = "";
+    renderStarterOptions();
+  }
+  aiInput.value = "";
+  aiInput.focus();
+}
+
+function replayChatMessages(chat) {
+  if (!chat || chat.messages.length === 0) return;
+
+  aiHasStarted = true;
+  if (aiStarterOptions) aiStarterOptions.style.display = "none";
+  aiConversation = [...chat.messages];
+
+  // Replay visible messages
+  chat.messages.forEach(msg => {
+    if (msg.role === "user") {
+      addAiMessage("user", msg.content);
+    } else if (msg.role === "assistant") {
+      // Try to parse structured response
+      try {
+        const data = JSON.parse(msg.content);
+        if (data.type === "explore" && data.title) {
+          addAiMessage("assistant", `${data.title}\n${data.summary || ""}`);
+        } else if (data.message) {
+          addAiMessage("assistant", data.message);
+        } else {
+          addAiMessage("assistant", msg.content);
+        }
+      } catch {
+        addAiMessage("assistant", msg.content);
+      }
+    }
+  });
+
+  // Restore last results on map if available
+  if (chat.lastResults && chat.lastResults.length > 0) {
+    showAiResults(chat.lastResults);
+  }
+}
+
+function relativeTime(dateStr) {
+  const now = Date.now();
+  const then = new Date(dateStr).getTime();
+  const diffSec = Math.floor((now - then) / 1000);
+  if (diffSec < 60) return "just now";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  if (diffSec < 604800) return `${Math.floor(diffSec / 86400)}d ago`;
+  return new Date(dateStr).toLocaleDateString();
+}
+
+function renderChatList() {
+  const chatList = document.getElementById("chat-list");
+  if (!chatList) return;
+  chatList.innerHTML = "";
+
+  // Sort by most recent
+  const sorted = [...chatSessions].sort((a, b) =>
+    new Date(b.updated_at) - new Date(a.updated_at)
+  );
+
+  sorted.forEach(chat => {
+    const item = document.createElement("div");
+    item.className = `chat-list-item${chat.id === activeChatId ? " active" : ""}`;
+    item.dataset.chatId = chat.id;
+
+    const title = chat.title || "New chat";
+    const time = relativeTime(chat.updated_at);
+    const msgCount = chat.messages.filter(m => m.role === "user").length;
+
+    item.innerHTML = `
+      <div class="chat-item-content">
+        <div class="chat-item-title">${title}</div>
+        <div class="chat-item-meta">${msgCount} message${msgCount !== 1 ? "s" : ""} · ${time}</div>
+      </div>
+      <button class="chat-item-delete" title="Delete chat">&#x2715;</button>
+    `;
+
+    item.addEventListener("click", (e) => {
+      if (e.target.closest(".chat-item-delete")) return;
+      switchToChat(chat.id);
+      if (window.innerWidth < 768) toggleSidebar(); // auto-close on mobile
+    });
+
+    item.querySelector(".chat-item-delete").addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteChat(chat.id);
+    });
+
+    chatList.appendChild(item);
+  });
+}
+
+function toggleSidebar() {
+  sidebarOpen = !sidebarOpen;
+  const sidebar = document.getElementById("chat-sidebar");
+  if (sidebar) {
+    sidebar.classList.toggle("open", sidebarOpen);
+  }
+}
+
+// Wire up sidebar toggle and new chat buttons
+document.getElementById("sidebar-toggle-btn")?.addEventListener("click", toggleSidebar);
+document.getElementById("new-chat-btn")?.addEventListener("click", () => {
+  createNewChat();
+  if (window.innerWidth < 768) toggleSidebar();
+});
+
+// Keyboard shortcut: Cmd/Ctrl+N for new chat
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "n") {
+    e.preventDefault();
+    createNewChat();
+  }
+});
+
+// Initialize: load chats and restore active session
+loadChatsFromStorage();
+if (chatSessions.length === 0) {
+  createNewChat(true);
+} else if (activeChatId) {
+  const chat = getActiveChat();
+  if (chat && chat.messages.length > 0) {
+    replayChatMessages(chat);
+  }
+}
+renderChatList();
 
 // ── 5 Starter analysis options ──────────────────────────────────────────────
 const STARTER_OPTIONS = [
@@ -943,52 +1364,23 @@ function renderStarterOptions() {
     const btn = document.createElement("button");
     btn.className = "ai-starter-btn";
     btn.dataset.idx = idx;
-    btn.innerHTML = `<span class="ai-starter-icon">${opt.icon}</span><span class="ai-starter-label">${opt.label}</span>`;
+    btn.innerHTML = `
+      <span class="ai-starter-icon">${opt.icon}</span>
+      <div class="ai-starter-text">
+        <span class="ai-starter-label">${opt.label}</span>
+        <span class="ai-starter-desc">${opt.reason.split('.')[0]}.</span>
+      </div>
+    `;
 
+    // Single click runs the analysis immediately — no explainer friction
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      // Show explainer first
-      showStarterExplainer(opt, btn);
+      hideStarterOptions();
+      sendAiMessage(opt.prompt);
     });
 
     aiStarterOptions.appendChild(btn);
   });
-}
-
-function showStarterExplainer(opt, anchorBtn) {
-  // Remove any existing explainer
-  document.querySelectorAll(".ai-starter-explainer").forEach(el => el.remove());
-
-  const explainer = document.createElement("div");
-  explainer.className = "ai-starter-explainer";
-  explainer.innerHTML = `
-    <div class="ai-explainer-header">
-      <span>${opt.icon} ${opt.label}</span>
-      <button class="ai-explainer-close" title="Close">✕</button>
-    </div>
-    <div class="ai-explainer-reason">${opt.reason}</div>
-    <button class="ai-explainer-run">Run this analysis →</button>
-  `;
-
-  // Insert after the starter options
-  aiStarterOptions.parentNode.insertBefore(explainer, aiStarterOptions.nextSibling);
-
-  // Close button
-  explainer.querySelector(".ai-explainer-close").addEventListener("click", (e) => {
-    e.stopPropagation();
-    explainer.remove();
-  });
-
-  // Run button
-  explainer.querySelector(".ai-explainer-run").addEventListener("click", (e) => {
-    e.stopPropagation();
-    explainer.remove();
-    hideStarterOptions();
-    sendAiMessage(opt.prompt);
-  });
-
-  // Scroll into view
-  setTimeout(() => explainer.scrollIntoView({ behavior: "smooth", block: "nearest" }), 50);
 }
 
 function hideStarterOptions() {
@@ -998,25 +1390,11 @@ function hideStarterOptions() {
   document.querySelectorAll(".ai-starter-explainer").forEach(el => el.remove());
 }
 
-// Toggle panel expand/collapse
-function toggleAiPanel() {
-  aiPanel.classList.toggle("expanded");
-  if (aiPanel.classList.contains("expanded")) {
-    setTimeout(() => aiInput.focus(), 350);
-  }
-}
-
-document.getElementById("ai-panel-header").addEventListener("click", toggleAiPanel);
-document.getElementById("ai-panel-expand").addEventListener("click", (e) => {
-  e.stopPropagation();
-  toggleAiPanel();
-});
-
-// Auto-expand on first load and render starters
+// Render starters on load
 setTimeout(() => {
-  aiPanel.classList.add("expanded");
   renderStarterOptions();
-}, 800);
+  aiInput.focus();
+}, 400);
 
 // Send message
 async function sendAiMessage(text) {
@@ -1031,15 +1409,30 @@ async function sendAiMessage(text) {
   aiInput.value = "";
   aiSuggestionsEl.innerHTML = "";
 
-  // Clear previous insights
-  if (aiInsightsContainer) aiInsightsContainer.innerHTML = "";
-
   // Add to conversation
   aiConversation.push({ role: "user", content: text });
 
-  // Show loading
-  const loadingEl = addAiMessage("loading", "Analyzing across all data layers");
+  // Persist user message immediately
+  syncCurrentChatState();
+  saveChatsToStorage();
+  renderChatList();
+
+  // Show loading with staged progress messages
+  const loadingEl = addAiMessage("loading", "Thinking");
   aiSendBtn.classList.add("loading");
+
+  // Staged loading messages for polish
+  const loadingStages = [
+    { text: "Forming analysis strategy", delay: 1500 },
+    { text: "Querying property database", delay: 4000 },
+    { text: "Ranking opportunities", delay: 7000 },
+  ];
+  const stageTimers = loadingStages.map(stage =>
+    setTimeout(() => {
+      const content = loadingEl.querySelector(".ai-msg-content");
+      if (content) content.innerHTML = `<span class="ai-loading-icon">&#9889;</span>${stage.text}<span class="ai-loading-dots"></span>`;
+    }, stage.delay)
+  );
 
   try {
     const resp = await fetch(`${API}/ai/chat`, {
@@ -1056,73 +1449,50 @@ async function sendAiMessage(text) {
     const data = await resp.json();
 
     // Remove loading
+    stageTimers.forEach(clearTimeout);
     loadingEl.remove();
     aiSendBtn.classList.remove("loading");
 
     // Store response in conversation
     aiConversation.push({ role: "assistant", content: JSON.stringify(data) });
 
-    // Handle explore response (hypothesis-driven pipeline)
+    // Persist chat session
+    syncCurrentChatState();
+    saveChatsToStorage();
+    renderChatList();
+
+    // Handle explore response — flat ranked results, no hypothesis switching
     if (data.type === "explore") {
-      // Show title + summary as message
       const summaryText = data.title
         ? `${data.title}\n${data.summary || ""}`
         : data.summary || data.message || "Analysis complete.";
       addAiMessage("assistant", summaryText);
 
-      // Show hypothesis cards
-      if (data.hypotheses && data.hypotheses.length > 0) {
-        showHypotheses(data.hypotheses);
-      }
-
-      // Show results on map
-      if (data.results && data.results.length > 0) {
-        showAiResults(data.results);
-      } else {
-        addAiMessage("assistant", "No matching results found on the map for this query. Try a different area or broader criteria.");
-      }
-
-      // Show follow-up chips
-      if (data.follow_ups && data.follow_ups.length > 0) {
-        showAiFollowUps(data.follow_ups);
-      }
-    }
-    // Handle analysis response (legacy format)
-    else if (data.type === "analysis") {
-      const summaryText = data.title
-        ? `${data.title}\n${data.summary || ""}`
-        : data.summary || data.message || "Analysis complete.";
-      addAiMessage("assistant", summaryText);
-
-      if (data.insights && data.insights.length > 0) {
-        showAiInsights(data.insights);
+      // Show query stats as a subtle indicator
+      if (data.query_stats) {
+        const stats = data.query_stats;
+        if (stats.total > 0 && stats.successful < stats.total) {
+          addAiMessage("assistant", `Ran ${stats.total} queries across the database (${stats.successful} returned results).`);
+        }
       }
 
       if (data.results && data.results.length > 0) {
         showAiResults(data.results);
       } else {
-        addAiMessage("assistant", "No matching results found on the map for this query. Try a different area or broader criteria.");
+        addAiMessage("assistant", "No matching sites found for this query. Try a different area or broader criteria.");
       }
 
       if (data.follow_ups && data.follow_ups.length > 0) {
         showAiFollowUps(data.follow_ups);
       }
     }
-    // Backwards compat for "search" type
-    else if (data.type === "search") {
-      addAiMessage("assistant", data.message || "Search complete.");
-      if (data.results && data.results.length > 0) {
-        showAiResults(data.results);
-      }
-    }
-    // Fallback for clarify (shouldn't happen with new prompt)
+    // Fallback for clarify
     else if (data.type === "clarify") {
       addAiMessage("assistant", data.message || "Let me try that differently...");
       if (data.suggestions && data.suggestions.length > 0) {
         showAiFollowUps(data.suggestions.map(s => ({
           label: s.length > 30 ? s.substring(0, 28) + "…" : s,
           prompt: s,
-          reason: ""
         })));
       }
     }
@@ -1130,6 +1500,7 @@ async function sendAiMessage(text) {
       addAiMessage("assistant", data.message || JSON.stringify(data));
     }
   } catch (err) {
+    stageTimers.forEach(clearTimeout);
     loadingEl.remove();
     aiSendBtn.classList.remove("loading");
     addAiMessage("assistant", `Something went wrong: ${err.message}`);
@@ -1168,42 +1539,6 @@ function addAiMessage(role, text) {
   return div;
 }
 
-function showAiInsights(insights) {
-  if (!aiInsightsContainer) return;
-  aiInsightsContainer.innerHTML = "";
-  aiInsightsContainer.style.display = "block";
-
-  insights.forEach((insight) => {
-    const card = document.createElement("div");
-    card.className = "ai-insight-card";
-    card.innerHTML = `
-      <div class="ai-insight-data">${insight.data_point || ""}</div>
-      <div class="ai-insight-heading">${insight.heading || ""}</div>
-      <div class="ai-insight-text">${insight.text || ""}</div>
-    `;
-    aiInsightsContainer.appendChild(card);
-  });
-}
-
-function showHypotheses(hypotheses) {
-  if (!aiInsightsContainer) return;
-  aiInsightsContainer.innerHTML = "";
-  aiInsightsContainer.style.display = "block";
-
-  hypotheses.forEach((h) => {
-    const card = document.createElement("div");
-    const status = (h.status || "moderate").toLowerCase();
-    card.className = `ai-hypothesis-card ai-hypothesis-${status}`;
-    card.innerHTML = `
-      <div class="ai-hypothesis-header">
-        <span class="ai-hypothesis-name">${h.name || ""}</span>
-        <span class="ai-hypothesis-badge ai-hypothesis-badge-${status}">${status}</span>
-      </div>
-      <div class="ai-hypothesis-verdict">${h.verdict || ""}</div>
-    `;
-    aiInsightsContainer.appendChild(card);
-  });
-}
 
 function showAiFollowUps(followUps) {
   aiSuggestionsEl.innerHTML = "";
@@ -1213,73 +1548,53 @@ function showAiFollowUps(followUps) {
 
     const label = typeof fu === "string" ? fu : fu.label;
     const prompt = typeof fu === "string" ? fu : fu.prompt;
-    const reason = typeof fu === "string" ? "" : (fu.reason || "");
 
     chip.innerHTML = `<span class="ai-followup-label">${label}</span>`;
-
-    if (reason) {
-      chip.setAttribute("title", reason);
-      // Add a small info dot
-      const dot = document.createElement("span");
-      dot.className = "ai-followup-info";
-      dot.textContent = "?";
-      dot.addEventListener("click", (e) => {
-        e.stopPropagation();
-        showFollowUpReason(chip, reason);
-      });
-      chip.appendChild(dot);
-    }
+    chip.setAttribute("title", prompt);
 
     chip.addEventListener("click", () => {
-      // Remove any open reason tooltip
-      document.querySelectorAll(".ai-followup-reason").forEach(el => el.remove());
       sendAiMessage(prompt);
     });
     aiSuggestionsEl.appendChild(chip);
   });
 }
 
-function showFollowUpReason(anchor, reason) {
-  // Remove existing
-  document.querySelectorAll(".ai-followup-reason").forEach(el => el.remove());
-
-  const tip = document.createElement("div");
-  tip.className = "ai-followup-reason";
-  tip.textContent = reason;
-
-  // Insert into the suggestions container
-  const container = anchor.closest("#ai-suggestions");
-  if (container) {
-    container.appendChild(tip);
-  }
-
-  // Auto-dismiss after 5s
-  setTimeout(() => tip.remove(), 5000);
-}
-
 function showAiResults(results) {
   clearAiMarkers();
   aiResultsContainer.style.display = "block";
-  aiResultsCount.textContent = `${results.length} results`;
+  aiResultsCount.textContent = `${results.length} site${results.length !== 1 ? "s" : ""} found`;
   aiResultsList.innerHTML = "";
   aiActiveResultIdx = -1;
 
+  // Store results reference for keyboard navigation
+  showAiResults._currentResults = results;
+
   results.forEach((result, idx) => {
+    const isTopPick = idx === 0;
+    const score = result._score || 0;
     const card = document.createElement("div");
-    card.className = "ai-result-card";
+    card.className = `ai-result-card${isTopPick ? " ai-result-top-pick" : ""}`;
     card.dataset.idx = idx;
 
-    // Rank badge
+    // Rank badge with score ring
     const rank = document.createElement("div");
-    rank.className = "ai-result-rank";
+    rank.className = `ai-result-rank${isTopPick ? " ai-result-rank-top" : ""}`;
     rank.textContent = idx + 1;
 
     // Info section
     const info = document.createElement("div");
     info.className = "ai-result-info";
 
+    const titleRow = document.createElement("div");
+    titleRow.className = "ai-result-title-row";
     const title = document.createElement("div");
     title.className = "ai-result-title";
+
+    // Score pill
+    const scorePill = document.createElement("span");
+    scorePill.className = `ai-result-score${score >= 80 ? " score-high" : score >= 60 ? " score-mid" : " score-low"}`;
+    scorePill.textContent = score;
+
     const meta = document.createElement("div");
     meta.className = "ai-result-meta";
 
@@ -1292,7 +1607,7 @@ function showAiResults(results) {
       const beds = result.beds ? `${result.beds}bed` : "";
       meta.textContent = [price, result.property_type, area, beds].filter(Boolean).join(" · ");
     } else if (table === "cadastral_freehold" || table === "cadastral_leasehold") {
-      title.textContent = result.national_ref || result.inspire_id || `Parcel #${result.id}`;
+      title.textContent = result.nationalcadastralreference || result.national_ref || result.inspire_id || `Parcel #${result.ogc_fid || result.id || ""}`;
       const area = result.area_sqm ? `${Number(result.area_sqm).toLocaleString()}m²` : "";
       const acres = result.area_sqm ? `(${(result.area_sqm / 4046.86).toFixed(2)}ac)` : "";
       const type = table === "cadastral_freehold" ? "Freehold" : "Leasehold";
@@ -1301,15 +1616,27 @@ function showAiResults(results) {
       title.textContent = result.zone_desc || "RZLT Site";
       const area = result.site_area ? `${Number(result.site_area).toLocaleString()}m²` : "";
       meta.textContent = [result.local_authority_name, area, "3% annual tax"].filter(Boolean).join(" · ");
-    } else if (table === "dlr_planning_polygons") {
+    } else if (table === "dlr_planning_polygons" || table === "dlr_planning_points") {
       title.textContent = result.plan_ref || "Planning App";
       meta.textContent = [result.decision, result.location].filter(Boolean).join(" · ");
+    } else {
+      // Generic fallback for unknown table types
+      title.textContent = result.address || result.nationalcadastralreference || result.plan_ref || result.zone_desc || `Site #${idx + 1}`;
+      const metaParts = [];
+      if (result.sale_price) metaParts.push(`€${Number(result.sale_price).toLocaleString()}`);
+      if (result.area_sqm) metaParts.push(`${Number(result.area_sqm).toLocaleString()}m²`);
+      if (result.site_area) metaParts.push(`${Number(result.site_area).toLocaleString()}m²`);
+      if (result.property_type) metaParts.push(result.property_type);
+      if (result.decision) metaParts.push(result.decision);
+      meta.textContent = metaParts.join(" · ") || `${result.lat?.toFixed(4)}, ${result.lng?.toFixed(4)}`;
     }
 
-    info.appendChild(title);
+    titleRow.appendChild(title);
+    titleRow.appendChild(scorePill);
+    info.appendChild(titleRow);
     info.appendChild(meta);
 
-    // Opportunity reason (from hypothesis evaluation)
+    // Opportunity reason
     if (result.opportunity_reason) {
       const reason = document.createElement("div");
       reason.className = "ai-result-reason";
@@ -1329,9 +1656,12 @@ function showAiResults(results) {
     } else if (table === "rzlt") {
       badge.classList.add("rzlt");
       badge.textContent = "RZLT";
-    } else if (table === "dlr_planning_polygons") {
+    } else if (table === "dlr_planning_polygons" || table === "dlr_planning_points") {
       badge.classList.add("planning");
-      badge.textContent = result.decision ? result.decision.substring(0, 6) : "—";
+      badge.textContent = result.decision ? result.decision.substring(0, 6) : "Plan";
+    } else {
+      // Generic badge
+      badge.textContent = score ? `${score}` : "—";
     }
 
     card.appendChild(rank);
@@ -1342,7 +1672,7 @@ function showAiResults(results) {
     // Add map marker
     if (result.lng && result.lat) {
       const markerEl = document.createElement("div");
-      markerEl.className = "ai-marker";
+      markerEl.className = `ai-marker${isTopPick ? " ai-marker-top" : ""}`;
       markerEl.textContent = idx + 1;
       markerEl.dataset.idx = idx;
 
@@ -1362,8 +1692,11 @@ function showAiResults(results) {
     card.addEventListener("click", () => selectAiResult(idx, results));
   });
 
-  // Fit map to show all results
+  // Fit map to show all results and auto-select top pick
   if (results.length > 0) {
+    // If map is collapsed, expand it first
+    if (mapCollapsed) toggleMapPanel();
+
     const bounds = new maplibregl.LngLatBounds();
     let hasPoints = false;
     results.forEach((r) => {
@@ -1375,6 +1708,18 @@ function showAiResults(results) {
     if (hasPoints) {
       map.fitBounds(bounds, { padding: 80, maxZoom: 16, duration: 1200 });
     }
+
+    // Auto-select top pick after map animation
+    setTimeout(() => {
+      const firstCard = aiResultsList.querySelector(".ai-result-card");
+      if (firstCard) {
+        firstCard.classList.add("active");
+        aiActiveResultIdx = 0;
+        document.querySelectorAll(".ai-marker").forEach((m) => {
+          m.classList.toggle("active", parseInt(m.dataset.idx) === 0);
+        });
+      }
+    }, 1400);
   }
 }
 
@@ -1396,63 +1741,31 @@ function selectAiResult(idx, results) {
 
   // Fly to location
   if (result.lng && result.lat) {
+    // If map is collapsed, expand it first
+    if (mapCollapsed) toggleMapPanel();
     map.flyTo({ center: [result.lng, result.lat], zoom: 17, duration: 1000 });
   }
 
-  // Show detail in sidebar based on type
+  // Show detail in flyout based on type
   const table = result._table;
   if (table === "sold_properties") {
-    showSoldSidebar(result);
+    showSoldFlyout(result);
   } else if (table === "cadastral_freehold" || table === "cadastral_leasehold") {
-    showSidebar({
-      id: result.id,
-      national_ref: result.national_ref,
-      inspire_id: result.inspire_id,
+    showParcelFlyout({
+      id: result.ogc_fid || result.id,
+      national_ref: result.nationalcadastralreference || result.national_ref,
+      inspire_id: result.gml_id || result.inspire_id,
       area_sqm: result.area_sqm,
       area_acres: result.area_sqm ? +(result.area_sqm / 4046.86).toFixed(3) : null,
       type: table === "cadastral_freehold" ? "freehold" : "leasehold",
     });
   } else if (table === "rzlt") {
-    showRzltSidebar(result);
-  } else if (table === "dlr_planning_polygons") {
-    showPlanningSidebar(result);
+    showRzltFlyout(result);
+  } else if (table === "dlr_planning_polygons" || table === "dlr_planning_points") {
+    showPlanningFlyout(result);
+  } else {
+    showGenericFlyout(result);
   }
-}
-
-function showRzltSidebar(data) {
-  const content = document.getElementById("sidebar-content");
-  const area = data.site_area ? `${Number(data.site_area).toLocaleString()}` : "—";
-
-  content.innerHTML = `
-    <div class="detail-row">
-      <div class="detail-label">Zone Description</div>
-      <div class="detail-value large" style="color:#ff6b6b">${data.zone_desc || "—"}</div>
-    </div>
-    <div class="detail-row">
-      <div class="detail-label">Site Area</div>
-      <div class="detail-value">${area} m²</div>
-    </div>
-    <hr>
-    <div class="detail-row">
-      <div class="detail-label">Zone GZT</div>
-      <div class="detail-value">${data.zone_gzt || "—"}</div>
-    </div>
-    <div class="detail-row">
-      <div class="detail-label">GZT Description</div>
-      <div class="detail-value" style="font-size:0.85em;line-height:1.4">${data.gzt_desc || "—"}</div>
-    </div>
-    <div class="detail-row">
-      <div class="detail-label">Local Authority</div>
-      <div class="detail-value">${data.local_authority_name || "—"}</div>
-    </div>
-    <hr>
-    <div class="detail-row">
-      <div class="detail-label" style="color:#ff6b6b">RZLT Status</div>
-      <div class="detail-value" style="color:#ff6b6b;font-size:12px;line-height:1.4">Subject to 3% annual Residential Zoned Land Tax — strong motivated seller signal</div>
-    </div>
-  `;
-
-  document.getElementById("sidebar").classList.add("open");
 }
 
 function clearAiMarkers() {
@@ -1476,25 +1789,53 @@ aiInput.addEventListener("keydown", (e) => {
   }
 });
 
-// Keyboard shortcut: Cmd/Ctrl+K to toggle AI panel
+// Keyboard shortcut: Cmd/Ctrl+K to focus chat input
 document.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === "k") {
     e.preventDefault();
-    toggleAiPanel();
+    aiInput.focus();
   }
 });
 
-// Move zoom hint up when AI panel is present
-document.getElementById("zoom-hint").style.bottom = "90px";
+// ── Keyboard navigation between results ─────────────────────────────────────
+document.addEventListener("keydown", (e) => {
+  // Only when results are showing and input is not focused
+  if (document.activeElement === aiInput) return;
+  const results = showAiResults._currentResults;
+  if (!results || results.length === 0) return;
+
+  let targetIdx = -1;
+
+  // Number keys 1-9 jump to that result directly
+  if (e.key >= "1" && e.key <= "9") {
+    targetIdx = parseInt(e.key) - 1;
+  }
+  // Arrow down / j = next
+  else if (e.key === "ArrowDown" || e.key === "j") {
+    e.preventDefault();
+    targetIdx = Math.min((aiActiveResultIdx < 0 ? -1 : aiActiveResultIdx) + 1, results.length - 1);
+  }
+  // Arrow up / k = previous
+  else if (e.key === "ArrowUp" || e.key === "k") {
+    e.preventDefault();
+    targetIdx = Math.max((aiActiveResultIdx < 0 ? 1 : aiActiveResultIdx) - 1, 0);
+  }
+
+  if (targetIdx >= 0 && targetIdx < results.length) {
+    selectAiResult(targetIdx, results);
+    // Scroll the card into view
+    const card = aiResultsList.querySelector(`[data-idx="${targetIdx}"]`);
+    if (card) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+});
 
 // ── Circle analysis ──────────────────────────────────────────────────────────
 
-function showCircleStatsSidebar(data) {
-  const content = document.getElementById("sidebar-content");
+function showCircleStatsFlyout(data) {
   const count = data.count || 0;
 
   if (count === 0) {
-    content.innerHTML = `
+    flyoutContent.innerHTML = `
       <div class="detail-row">
         <div class="detail-label">Radius</div>
         <div class="detail-value large" style="color:#9b59b6">${data.radius_m}m</div>
@@ -1507,7 +1848,7 @@ function showCircleStatsSidebar(data) {
       <hr>
       <p style="color:#888; font-size:13px; text-align:center; margin-top:20px;">No sold properties found within this radius.</p>
     `;
-    document.getElementById("sidebar").classList.add("open");
+    openFlyout("Circle Analysis");
     return;
   }
 
@@ -1533,7 +1874,7 @@ function showCircleStatsSidebar(data) {
     })
     .join("");
 
-  content.innerHTML = `
+  flyoutContent.innerHTML = `
     <div class="detail-row">
       <div class="detail-label">Radius</div>
       <div class="detail-value large" style="color:#9b59b6">${data.radius_m}m</div>
@@ -1588,5 +1929,5 @@ function showCircleStatsSidebar(data) {
     ${typeBars}
   `;
 
-  document.getElementById("sidebar").classList.add("open");
+  openFlyout("Circle Analysis");
 }

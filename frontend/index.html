@@ -9,77 +9,121 @@
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 
-  <link rel="stylesheet" href="style.css?v=12" />
+  <link rel="stylesheet" href="style.css?v=17" />
 </head>
 <body>
 
-  <!-- Map canvas -->
-  <div id="map"></div>
-
-  <!-- Search bar -->
-  <div id="search-container">
-    <input
-      id="search-input"
-      type="text"
-      placeholder="Search Dublin… e.g. Stoneybatter, D7"
-      autocomplete="off"
-    />
-    <button id="search-btn">Search</button>
-    <div id="search-results"></div>
-  </div>
-
-  <!-- Layer toggle panel -->
-  <div id="layer-panel">
-    <h3>Layers</h3>
-    <button id="circle-mode-btn" type="button">Circle Analysis</button>
-    <hr style="border:none;border-top:1px solid #333;margin:10px 0 8px;">
-    <div id="layer-list">
-      <!-- Populated by app.js after /api/layers -->
-    </div>
-  </div>
-
-  <!-- Zoom hint -->
-  <div id="zoom-hint">Zoom in to see parcels (zoom 15+)</div>
-
-  <!-- Detail sidebar -->
-  <div id="sidebar">
-    <div id="sidebar-header">
-      <span id="sidebar-title">Parcel Detail</span>
-      <button id="sidebar-close" title="Close">&#x2715;</button>
-    </div>
-    <div id="sidebar-content">
-      <p style="color:#555; font-size:13px;">Click a parcel to see its details.</p>
-    </div>
-  </div>
-
-  <!-- AI Assistant Panel -->
-  <div id="ai-panel">
-    <div id="ai-panel-header" title="Click to expand">
-      <div id="ai-panel-toggle">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 2a4 4 0 0 1 4 4v1a3 3 0 0 1 3 3v1a2 2 0 0 1-2 2h-1v3l-3-3H7a2 2 0 0 1-2-2v-1a3 3 0 0 1 3-3V6a4 4 0 0 1 4-4z"/>
-          <circle cx="9" cy="10" r="1"/><circle cx="15" cy="10" r="1"/>
-        </svg>
-        <span>AI Site Finder</span>
+  <div id="app">
+    <!-- ── Chat History Sidebar ─────────────────────────────────── -->
+    <div id="chat-sidebar">
+      <div id="sidebar-header">
+        <span class="sidebar-title">Chats</span>
+        <button id="new-chat-btn" title="New chat (⌘N)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
       </div>
-      <button id="ai-panel-expand" title="Expand/Collapse">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="18 15 12 9 6 15"/>
+      <div id="chat-list"></div>
+    </div>
+
+    <!-- ── Left: Map Panel ──────────────────────────────────────── -->
+    <div id="map-panel">
+      <div id="map"></div>
+
+      <!-- Search bar (inside map) -->
+      <div id="search-container">
+        <input
+          id="search-input"
+          type="text"
+          placeholder="Search Dublin… e.g. Stoneybatter, D7"
+          autocomplete="off"
+        />
+        <button id="search-btn">Search</button>
+        <div id="search-results"></div>
+      </div>
+
+      <!-- Layer toggle panel (inside map) — compact, expandable -->
+      <div id="layer-panel" class="collapsed">
+        <button id="layer-toggle-btn" type="button" title="Show layers">
+          <span class="layer-toggle-icon">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+              <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+            </svg>
+          </span>
+          <span class="layer-toggle-label">Layers</span>
+          <span class="layer-toggle-chevron">▾</span>
+        </button>
+        <div id="layer-panel-content">
+          <button id="circle-mode-btn" type="button">Circle Analysis</button>
+          <div id="layer-list"></div>
+        </div>
+      </div>
+
+      <!-- Zoom hint -->
+      <div id="zoom-hint">Zoom in to see parcels (zoom 15+)</div>
+
+      <!-- Flyout panel (overlays map from right side) -->
+      <div id="flyout-panel">
+        <div id="flyout-header">
+          <span id="flyout-title">Detail</span>
+          <div id="flyout-actions">
+            <button id="flyout-back" title="Back to chat">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4-4 4-4h12a2 2 0 0 1 2 2z"/>
+              </svg>
+              Chat
+            </button>
+            <button id="flyout-close" title="Close">&#x2715;</button>
+          </div>
+        </div>
+        <div id="flyout-content">
+          <p style="color:#555; font-size:13px;">Click a parcel to see its details.</p>
+        </div>
+      </div>
+
+      <!-- Collapse toggle -->
+      <button id="map-collapse-btn" title="Collapse map (Cmd+\\)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="15 18 9 12 15 6"/>
         </svg>
       </button>
     </div>
 
-    <div id="ai-panel-body">
-      <div id="ai-messages">
+    <!-- ── Resize divider ───────────────────────────────────────── -->
+    <div id="resize-divider"></div>
+
+    <!-- ── Right: Chat Panel ────────────────────────────────────── -->
+    <div id="chat-panel">
+      <div id="chat-header">
+        <div id="chat-header-left">
+          <button id="sidebar-toggle-btn" title="Chat history">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+            </svg>
+          </button>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2a4 4 0 0 1 4 4v1a3 3 0 0 1 3 3v1a2 2 0 0 1-2 2h-1v3l-3-3H7a2 2 0 0 1-2-2v-1a3 3 0 0 1 3-3V6a4 4 0 0 1 4-4z"/>
+            <circle cx="9" cy="10" r="1"/><circle cx="15" cy="10" r="1"/>
+          </svg>
+          <span>LandOS</span>
+        </div>
+        <button id="map-expand-btn" title="Show map" style="display:none;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+          Map
+        </button>
+      </div>
+
+      <div id="chat-messages">
         <div class="ai-msg ai-msg-assistant">
           <div class="ai-msg-content">Explore Dublin development opportunities. Pick an analysis below or type your own query.</div>
         </div>
       </div>
 
       <div id="ai-starter-options"></div>
-      <!-- explainer gets inserted here dynamically -->
-
-      <div id="ai-insights-container" style="display:none;"></div>
 
       <div id="ai-results-container" style="display:none;">
         <div id="ai-results-header">
@@ -91,11 +135,11 @@
 
       <div id="ai-suggestions"></div>
 
-      <div id="ai-input-row">
+      <div id="chat-input-row">
         <input
           id="ai-input"
           type="text"
-          placeholder="Type any question — areas, prices, sites, planning…"
+          placeholder="Ask anything — areas, prices, sites, planning…"
           autocomplete="off"
         />
         <button id="ai-send" title="Send">
@@ -107,6 +151,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=17"></script>
 </body>
 </html>

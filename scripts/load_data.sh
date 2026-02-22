@@ -256,6 +256,20 @@ else
   echo "==> Skipping Sold Properties (mongodb-local container not running)"
 fi
 
+# ── Register RZLT layer (off by default — toggle on via UI) ──────────────────
+PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" <<SQL
+INSERT INTO layers (name, display_name, table_name, is_active, min_zoom, style)
+VALUES (
+  'rzlt',
+  'RZLT Sites (Residential Zoned Land Tax)',
+  'rzlt',
+  false,
+  10,
+  '{"fillColor": "rgba(255,0,0,0.2)", "strokeColor": "#ff0000", "strokeWidth": 2}'
+)
+ON CONFLICT (name) DO UPDATE SET is_active = false;
+SQL
+
 echo ""
 echo "==> Done! Summary:"
 PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
