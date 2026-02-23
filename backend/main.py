@@ -702,6 +702,206 @@ def get_parcel(parcel_id: int, parcel_type: str = Query("freehold")):
     }
 
 
+ENRICHMENT_RADIUS_M = 500
+
+
+@app.get("/api/parcel/{parcel_id}/enriched")
+def get_parcel_enriched(parcel_id: int, parcel_type: str = Query("freehold")):
+    """Return parcel details plus spatial enrichment: RZLT overlap, nearby planning, sales, census."""
+    table = PARCEL_TABLES.get(parcel_type)
+    if not table:
+        raise HTTPException(status_code=400, detail="parcel_type must be freehold or leasehold")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # 1) Fetch parcel basics + geometry centroid + full geom for overlap queries
+            cur.execute(
+                f"""
+                SELECT
+                    ogc_fid,
+                    nationalcadastralreference,
+                    gml_id,
+                    area_sqm,
+                    ST_X(ST_Centroid(geom)) AS centroid_lng,
+                    ST_Y(ST_Centroid(geom)) AS centroid_lat,
+                    geom
+                FROM {table}
+                WHERE ogc_fid = %s
+                """,
+                (parcel_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Parcel not found")
+
+            ogc_fid, national_ref, gml_id, area_sqm, centroid_lng, centroid_lat, parcel_geom = row
+            area_sqm_val = round(area_sqm, 1) if area_sqm is not None else None
+            area_acres = round(area_sqm / 4046.86, 3) if area_sqm is not None else None
+
+            centroid_2157 = "ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 2157)"
+
+            # 2) RZLT overlap — does any RZLT zone intersect this parcel?
+            cur.execute(
+                f"""
+                SELECT zone_desc, site_area, local_authority_name, zone_gzt
+                FROM rzlt
+                WHERE ST_Intersects(geom, (SELECT geom FROM {table} WHERE ogc_fid = %s))
+                LIMIT 5
+                """,
+                (parcel_id,),
+            )
+            rzlt_rows = cur.fetchall()
+            rzlt_overlap = [
+                {"zone_desc": r[0], "site_area": r[1], "local_authority_name": r[2], "zone_gzt": r[3]}
+                for r in rzlt_rows
+            ]
+
+            # 3) Nearby planning apps within radius (sorted by distance)
+            cur.execute(
+                f"""
+                SELECT
+                    plan_ref,
+                    decision,
+                    descrptn,
+                    reg_date::text AS registered_date,
+                    dec_date::text AS decision_date,
+                    ROUND(ST_Distance(
+                        ST_Transform(geom, 2157),
+                        {centroid_2157}
+                    )::numeric, 0) AS distance_m
+                FROM dlr_planning_polygons
+                WHERE ST_DWithin(
+                    ST_Transform(geom, 2157),
+                    {centroid_2157},
+                    %s
+                )
+                ORDER BY distance_m
+                LIMIT 5
+                """,
+                (centroid_lng, centroid_lat, centroid_lng, centroid_lat, ENRICHMENT_RADIUS_M),
+            )
+            planning_rows = cur.fetchall()
+            nearby_planning = [
+                {
+                    "plan_ref": r[0], "decision": r[1], "description": r[2],
+                    "registered_date": r[3], "decision_date": r[4],
+                    "distance_m": int(r[5]) if r[5] is not None else None,
+                }
+                for r in planning_rows
+            ]
+
+            # 4) Sold property stats within radius
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS cnt,
+                    COALESCE(ROUND(AVG(sale_price)), 0) AS avg_sale,
+                    COALESCE(ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY sale_price)), 0) AS median_sale,
+                    COALESCE(ROUND(AVG(CASE WHEN floor_area_m2 > 0 THEN sale_price / floor_area_m2 END)), 0) AS avg_price_sqm
+                FROM sold_properties
+                WHERE ST_DWithin(
+                    ST_Transform(geom, 2157),
+                    {centroid_2157},
+                    %s
+                )
+                AND sale_price > 0 AND sale_price < 10000000
+                """,
+                (centroid_lng, centroid_lat, ENRICHMENT_RADIUS_M),
+            )
+            sales_agg = cur.fetchone()
+            sales_count, avg_sale, median_sale, avg_psm = sales_agg
+
+            # Top 5 nearest recent sales
+            cur.execute(
+                f"""
+                SELECT
+                    address, sale_price, sale_date::text, property_type,
+                    ROUND(ST_Distance(
+                        ST_Transform(geom, 2157),
+                        {centroid_2157}
+                    )::numeric, 0) AS distance_m
+                FROM sold_properties
+                WHERE ST_DWithin(
+                    ST_Transform(geom, 2157),
+                    {centroid_2157},
+                    %s
+                )
+                AND sale_price > 0 AND sale_price < 10000000
+                ORDER BY sale_date DESC NULLS LAST
+                LIMIT 5
+                """,
+                (centroid_lng, centroid_lat, centroid_lng, centroid_lat, ENRICHMENT_RADIUS_M),
+            )
+            recent_sales = [
+                {
+                    "address": r[0], "sale_price": r[1], "sale_date": r[2],
+                    "property_type": r[3], "distance_m": int(r[4]) if r[4] is not None else None,
+                }
+                for r in cur.fetchall()
+            ]
+
+            # 5) Census — small area containing this parcel centroid
+            cur.execute(
+                """
+                SELECT
+                    sa_pub2022,
+                    total_population,
+                    population_density,
+                    owner_occupied_pct,
+                    rented_pct,
+                    vacancy_rate,
+                    employment_rate,
+                    third_level_pct,
+                    avg_household_size
+                FROM census_small_areas
+                WHERE ST_Intersects(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+                AND total_population IS NOT NULL
+                LIMIT 1
+                """,
+                (centroid_lng, centroid_lat),
+            )
+            census_row = cur.fetchone()
+            census = None
+            if census_row:
+                census = {
+                    "small_area_id": census_row[0],
+                    "total_population": census_row[1],
+                    "population_density": float(census_row[2]) if census_row[2] else None,
+                    "owner_occupied_pct": float(census_row[3]) if census_row[3] else None,
+                    "rented_pct": float(census_row[4]) if census_row[4] else None,
+                    "vacancy_rate": float(census_row[5]) if census_row[5] else None,
+                    "employment_rate": float(census_row[6]) if census_row[6] else None,
+                    "third_level_pct": float(census_row[7]) if census_row[7] else None,
+                    "avg_household_size": float(census_row[8]) if census_row[8] else None,
+                }
+
+    finally:
+        put_conn(conn)
+
+    return {
+        "parcel": {
+            "id": ogc_fid,
+            "national_ref": national_ref,
+            "inspire_id": gml_id,
+            "area_sqm": area_sqm_val,
+            "area_acres": area_acres,
+            "type": parcel_type,
+        },
+        "centroid": {"lng": centroid_lng, "lat": centroid_lat},
+        "rzlt_overlap": rzlt_overlap,
+        "nearby_planning": nearby_planning,
+        "nearby_sales": {
+            "count": sales_count,
+            "avg_sale_price": int(avg_sale),
+            "median_sale_price": int(median_sale),
+            "avg_price_per_sqm": int(avg_psm),
+            "recent": recent_sales,
+        },
+        "census": census,
+    }
+
+
 @app.get("/api/search")
 async def search_location(q: str = Query(..., description="Location name or address")):
     """Geocode a location string using Nominatim (OpenStreetMap)."""

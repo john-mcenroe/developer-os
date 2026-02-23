@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git remote set-url:*)"
+      "Bash(git remote set-url:*)",
+      "Bash(docker-compose up:*)"
     ]
   }
 }

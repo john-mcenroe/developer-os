@@ -493,10 +493,10 @@ function setupParcelClick(fillLayerId, selectedLayerId, parcelType) {
     map.setFilter("cadastral_leasehold-selected", ["==", ["id"], -1]);
     map.setFilter(selectedLayerId, ["==", ["id"], id]);
 
-    // Fetch full details and open flyout
-    fetch(`${API}/parcel/${id}?parcel_type=${parcelType}`)
+    // Fetch enriched details and open flyout
+    fetch(`${API}/parcel/${id}/enriched?parcel_type=${parcelType}`)
       .then((r) => r.json())
-      .then((data) => showParcelFlyout(data))
+      .then((data) => showEnrichedParcelFlyout(data))
       .catch(() => showParcelFlyout(props));
   });
 
@@ -637,6 +637,181 @@ function showParcelFlyout(data) {
   `;
 
   openFlyout("Parcel Detail");
+}
+
+function showEnrichedParcelFlyout(data) {
+  const p = data.parcel;
+  const areaSqm = p.area_sqm ? p.area_sqm.toLocaleString() : "—";
+  const areaAcres = p.area_acres != null ? p.area_acres : "—";
+  const typeLabel = (p.type || "freehold").charAt(0).toUpperCase() + (p.type || "freehold").slice(1);
+  const typeColor = p.type === "leasehold" ? "#6495ed" : "#ff8c00";
+
+  // ── Section 1: Parcel Basics ──
+  let html = `
+    <div class="detail-row">
+      <div class="detail-label">Area</div>
+      <div class="detail-value large">${areaSqm} m²</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Acres</div>
+      <div class="detail-value">${areaAcres} ac</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Type</div>
+      <div class="detail-value" style="color:${typeColor}">${typeLabel}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Cadastral Ref</div>
+      <div class="detail-value">${p.national_ref || "—"}</div>
+    </div>
+  `;
+
+  // ── Section 2: RZLT Overlap ──
+  if (data.rzlt_overlap && data.rzlt_overlap.length > 0) {
+    html += `
+      <div class="enrichment-section">
+        <div class="rzlt-alert">RZLT Zone — 3% annual tax applies</div>
+    `;
+    for (const r of data.rzlt_overlap) {
+      html += `
+        <div class="detail-row">
+          <div class="detail-label">Zone</div>
+          <div class="detail-value">${r.zone_desc || r.zone_gzt || "—"}</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Site Area</div>
+          <div class="detail-value">${r.site_area ? r.site_area.toLocaleString() : "—"}</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Authority</div>
+          <div class="detail-value">${r.local_authority_name || "—"}</div>
+        </div>
+      `;
+    }
+    html += `</div>`;
+  }
+
+  // ── Section 3: Nearby Sales ──
+  const sales = data.nearby_sales;
+  if (sales && sales.count > 0) {
+    html += `
+      <div class="enrichment-section">
+        <div class="enrichment-section-title">Nearby Sales <span class="enrichment-subtitle">(${sales.count} within 500m)</span></div>
+        <div class="detail-row">
+          <div class="detail-label">Avg Sale Price</div>
+          <div class="detail-value large" style="color:#e74c3c">€${sales.avg_sale_price.toLocaleString()}</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Median Price</div>
+          <div class="detail-value">€${sales.median_sale_price.toLocaleString()}</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Avg Price / m²</div>
+          <div class="detail-value">${sales.avg_price_per_sqm ? "€" + sales.avg_price_per_sqm.toLocaleString() + "/m²" : "—"}</div>
+        </div>
+    `;
+    if (sales.recent && sales.recent.length > 0) {
+      html += `<div class="compact-list-header">Recent Sales</div>`;
+      for (const s of sales.recent.slice(0, 3)) {
+        const addr = s.address ? (s.address.length > 35 ? s.address.substring(0, 35) + "…" : s.address) : "—";
+        const dist = s.distance_m != null ? `${s.distance_m}m` : "";
+        html += `
+          <div class="compact-row">
+            <span class="compact-main">€${s.sale_price ? s.sale_price.toLocaleString() : "—"}</span>
+            <span class="compact-secondary">${addr}</span>
+            <span class="compact-badge">${dist}</span>
+          </div>
+        `;
+      }
+    }
+    html += `</div>`;
+  } else {
+    html += `
+      <div class="enrichment-section">
+        <div class="enrichment-section-title">Nearby Sales</div>
+        <p class="enrichment-empty">No sold properties within 500m</p>
+      </div>
+    `;
+  }
+
+  // ── Section 4: Planning Activity ──
+  const planning = data.nearby_planning;
+  if (planning && planning.length > 0) {
+    html += `
+      <div class="enrichment-section">
+        <div class="enrichment-section-title">Planning Activity <span class="enrichment-subtitle">(${planning.length} within 500m)</span></div>
+    `;
+    for (const pl of planning.slice(0, 3)) {
+      const desc = pl.description ? (pl.description.length > 40 ? pl.description.substring(0, 40) + "…" : pl.description) : "—";
+      const decision = pl.decision || "—";
+      const decColor = decision.toUpperCase().includes("GRANT") ? "#2ecc71" :
+                        decision.toUpperCase().includes("REFUS") ? "#e74c3c" : "#f59e0b";
+      const dist = pl.distance_m != null ? `${pl.distance_m}m` : "";
+      html += `
+        <div class="compact-row">
+          <span class="compact-main" style="color:${decColor}">${pl.plan_ref || "—"}</span>
+          <span class="compact-secondary">${desc}</span>
+          <span class="compact-badge">${dist}</span>
+        </div>
+      `;
+    }
+    html += `</div>`;
+  } else {
+    html += `
+      <div class="enrichment-section">
+        <div class="enrichment-section-title">Planning Activity</div>
+        <p class="enrichment-empty">No planning applications within 500m</p>
+      </div>
+    `;
+  }
+
+  // ── Section 5: Demographics ──
+  const c = data.census;
+  if (c) {
+    const ownerPct = c.owner_occupied_pct || 0;
+    const rentPct = c.rented_pct || 0;
+    const otherPct = Math.max(0, 100 - ownerPct - rentPct);
+    html += `
+      <div class="enrichment-section">
+        <div class="enrichment-section-title">Demographics <span class="enrichment-subtitle">(Census 2022)</span></div>
+        <div class="detail-row">
+          <div class="detail-label">Population</div>
+          <div class="detail-value" style="color:#00bcd4">${c.total_population ? c.total_population.toLocaleString() : "—"}</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Density</div>
+          <div class="detail-value">${c.population_density ? Math.round(c.population_density).toLocaleString() + " / km²" : "—"}</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Tenure</div>
+        </div>
+        <div class="tenure-bar">
+          <div class="tenure-segment owner" style="width:${ownerPct}%" title="Owner ${ownerPct}%"></div>
+          <div class="tenure-segment rented" style="width:${rentPct}%" title="Rented ${rentPct}%"></div>
+          <div class="tenure-segment other" style="width:${otherPct}%"></div>
+        </div>
+        <div class="tenure-legend">
+          <span><span class="legend-dot owner"></span>Owner ${ownerPct}%</span>
+          <span><span class="legend-dot rented"></span>Rented ${rentPct}%</span>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Vacancy</div>
+          <div class="detail-value" style="color:${c.vacancy_rate > 10 ? '#e74c3c' : c.vacancy_rate > 5 ? '#f59e0b' : '#2ecc71'}">${c.vacancy_rate != null ? c.vacancy_rate + "%" : "—"}</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Employment</div>
+          <div class="detail-value">${c.employment_rate != null ? c.employment_rate + "%" : "—"}</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Third Level Edu</div>
+          <div class="detail-value">${c.third_level_pct != null ? c.third_level_pct + "%" : "—"}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  flyoutContent.innerHTML = html;
+  openFlyout("Site Intelligence");
 }
 
 function showPlanningFlyout(data) {
