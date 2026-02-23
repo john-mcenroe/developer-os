@@ -31,6 +31,28 @@ const map = new maplibregl.Map({
   zoom: 12,
 });
 
+// ── Basemap toggle (Map ↔ Satellite) ─────────────────────────────────────────
+let currentBasemap = "map"; // "map" | "satellite"
+
+document.getElementById("basemap-toggle").addEventListener("click", () => {
+  const isSatellite = currentBasemap === "map";
+  currentBasemap = isSatellite ? "satellite" : "map";
+
+  const src = map.getSource("osm");
+  if (src) {
+    src.setTiles(
+      isSatellite
+        ? ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"]
+        : ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"]
+    );
+  }
+
+  // Update button label & icon
+  document.getElementById("basemap-label").textContent = isSatellite ? "Map" : "Satellite";
+  document.getElementById("basemap-icon-satellite").style.display = isSatellite ? "none" : "";
+  document.getElementById("basemap-icon-map").style.display = isSatellite ? "" : "none";
+});
+
 // ── GeoJSON sources + layers for cadastral parcels ───────────────────────────
 map.on("load", () => {
   // Freehold — orange
@@ -297,6 +319,52 @@ map.on("load", () => {
     },
   });
 
+  // Side Sites — yellow/gold for infill opportunities
+  map.addSource("side-sites", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+
+  map.addLayer({
+    id: "side_sites-fill",
+    type: "fill",
+    source: "side-sites",
+    layout: { visibility: "none" },
+    paint: {
+      "fill-color": [
+        "interpolate", ["linear"],
+        ["coalesce", ["get", "score"], 0],
+        0.3, "rgba(255, 235, 59, 0.25)",
+        0.6, "rgba(255, 193, 7, 0.4)",
+        0.8, "rgba(255, 152, 0, 0.55)",
+      ],
+      "fill-outline-color": "rgba(255, 193, 7, 0)",
+    },
+  });
+
+  map.addLayer({
+    id: "side_sites-outline",
+    type: "line",
+    source: "side-sites",
+    layout: { visibility: "none" },
+    paint: {
+      "line-color": "#f9a825",
+      "line-width": 2,
+    },
+  });
+
+  map.addLayer({
+    id: "side_sites-selected",
+    type: "fill",
+    source: "side-sites",
+    layout: { visibility: "none" },
+    filter: ["==", ["get", "id"], -1],
+    paint: {
+      "fill-color": "rgba(255, 193, 7, 0.6)",
+      "fill-outline-color": "#ff8f00",
+    },
+  });
+
   // Circle analysis overlay
   map.addSource("analysis-circle", {
     type: "geojson",
@@ -451,6 +519,20 @@ function loadParcels() {
     const srcSold = map.getSource("sold-properties");
     if (srcSold) srcSold.setData({ type: "FeatureCollection", features: [] });
   }
+
+  // Side Sites — infill candidates (zoom 15+ like parcels)
+  if (zoom >= PARCEL_MIN_ZOOM && isLayerVisible("side_sites")) {
+    fetch(`${API}/side_sites?bbox=${bbox}`)
+      .then((r) => r.json())
+      .then((geojson) => {
+        const src = map.getSource("side-sites");
+        if (src) src.setData(geojson);
+      })
+      .catch((err) => console.error("Failed to load side sites:", err));
+  } else if (zoom < PARCEL_MIN_ZOOM) {
+    const srcSide = map.getSource("side-sites");
+    if (srcSide) srcSide.setData({ type: "FeatureCollection", features: [] });
+  }
 }
 
 function isLayerVisible(layerName) {
@@ -567,7 +649,92 @@ map.on("load", () => {
   setupPlanningClick("dlr_planning_points-fill", null);
   setupSoldPropertyClick();
   setupCensusClick();
+  setupSideSiteClick();
 });
+
+// ── Side site click handler ──────────────────────────────────────────────────
+function setupSideSiteClick() {
+  map.on("click", "side_sites-fill", (e) => {
+    if (circleMode) return;
+    if (!e.features || e.features.length === 0) return;
+    const props = e.features[0].properties;
+
+    // Clear other selections
+    map.setFilter("cadastral_freehold-selected", ["==", ["id"], -1]);
+    map.setFilter("cadastral_leasehold-selected", ["==", ["id"], -1]);
+    if (map.getLayer("dlr_planning_polygons-selected")) {
+      map.setFilter("dlr_planning_polygons-selected", ["==", ["id"], -1]);
+    }
+    map.setFilter("side_sites-selected", ["==", ["get", "id"], props.id || -1]);
+
+    showSideSiteFlyout(props);
+  });
+
+  map.on("mouseenter", "side_sites-fill", () => {
+    map.getCanvas().style.cursor = "pointer";
+  });
+  map.on("mouseleave", "side_sites-fill", () => {
+    map.getCanvas().style.cursor = "";
+  });
+}
+
+function showSideSiteFlyout(props) {
+  const score = props.score != null ? (props.score * 100).toFixed(0) : "—";
+  const scoreColor = props.score >= 0.7 ? "#4caf50" : props.score >= 0.5 ? "#ff9800" : "#f44336";
+  const areaSqm = props.area_sqm ? Number(props.area_sqm).toLocaleString() : "—";
+  const areaAcres = props.area_acres || "—";
+  const compactness = props.compactness != null ? Number(props.compactness).toFixed(2) : "—";
+
+  flyoutContent.innerHTML = `
+    <div class="detail-row">
+      <div class="detail-label">Side Site Score</div>
+      <div class="detail-value large" style="color:${scoreColor}">${score}/100</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Area</div>
+      <div class="detail-value">${areaSqm} m² (${areaAcres} ac)</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Compactness</div>
+      <div class="detail-value">${compactness} ${Number(compactness) < 0.5 ? "— elongated" : "— compact"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Neighbors</div>
+      <div class="detail-value">${props.neighbor_count || 0} adjacent parcels</div>
+    </div>
+    <hr>
+    <div class="enrichment-section">
+      <div class="enrichment-title">Signals</div>
+      <div class="detail-row">
+        <div class="detail-label">Planning History</div>
+        <div class="detail-value">${props.has_planning === true || props.has_planning === "true" ? "⚠️ Has applications" : "✓ None found"}</div>
+      </div>
+      <div class="detail-row">
+        <div class="detail-label">RZLT Status</div>
+        <div class="detail-value">${props.on_rzlt === true || props.on_rzlt === "true" ? "🔥 On RZLT list (3% tax)" : "Not on RZLT"}</div>
+      </div>
+      <div class="detail-row">
+        <div class="detail-label">Owner Occupied %</div>
+        <div class="detail-value">${props.owner_occupied_pct || "—"}%</div>
+      </div>
+      <div class="detail-row">
+        <div class="detail-label">Vacancy Rate</div>
+        <div class="detail-value">${props.vacancy_rate || "—"}%</div>
+      </div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label">Cadastral Ref</div>
+      <div class="detail-value">${props.national_ref || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Internal ID</div>
+      <div class="detail-value">${props.id || "—"}</div>
+    </div>
+  `;
+
+  openFlyout("Side Site Candidate");
+}
 
 // ── Flyout Panel ─────────────────────────────────────────────────────────────
 const flyoutPanel = document.getElementById("flyout-panel");
@@ -585,6 +752,9 @@ function closeFlyout() {
   map.setFilter("cadastral_leasehold-selected", ["==", ["id"], -1]);
   if (map.getLayer("dlr_planning_polygons-selected")) {
     map.setFilter("dlr_planning_polygons-selected", ["==", ["id"], -1]);
+  }
+  if (map.getLayer("side_sites-selected")) {
+    map.setFilter("side_sites-selected", ["==", ["get", "id"], -1]);
   }
 }
 
@@ -1258,16 +1428,22 @@ document.addEventListener("click", (e) => {
 });
 
 // ── Layer toggles ────────────────────────────────────────────────────────────
+// Client-side computed layers (not in the DB layers table)
+const CLIENT_LAYERS = [
+  { name: "side_sites", display_name: "Side Sites (Infill)", is_active: false },
+];
+
 async function loadLayers() {
   try {
     const resp = await fetch(`${API}/layers`);
     const data = await resp.json();
-    renderLayerPanel(data.layers || []);
+    renderLayerPanel([...(data.layers || []), ...CLIENT_LAYERS]);
   } catch (err) {
     console.error("Failed to load layers:", err);
     renderLayerPanel([
       { name: "cadastral_freehold", display_name: "Cadastral Parcels (Freehold)", is_active: true },
       { name: "cadastral_leasehold", display_name: "Cadastral Parcels (Leasehold)", is_active: true },
+      ...CLIENT_LAYERS,
     ]);
   }
 }
@@ -1464,6 +1640,7 @@ let aiConversation = []; // {role, content}
 let aiMarkers = [];       // MapLibre markers on the map
 let aiActiveResultIdx = -1;
 let aiHasStarted = false; // track if user has made first query
+let conversationContext = null; // tracks last response context for follow-ups
 
 // ── Chat Session Management ─────────────────────────────────────────────────
 const CHATS_STORAGE_KEY = "landos_chats";
@@ -1587,6 +1764,7 @@ function resetChatUI() {
     <div class="ai-msg-content">Explore Dublin development opportunities. Pick an analysis below or type your own query.</div>
   </div>`;
   aiConversation = [];
+  conversationContext = null;
   aiSuggestionsEl.innerHTML = "";
   aiResultsContainer.style.display = "none";
   aiResultsList.innerHTML = "";
@@ -1617,11 +1795,17 @@ function replayChatMessages(chat) {
     if (msg.role === "user") {
       addAiMessage("user", msg.content);
     } else if (msg.role === "assistant") {
-      // Try to parse structured response
+      // Try to parse structured response and replay appropriately
       try {
         const data = JSON.parse(msg.content);
         if (data.type === "explore" && data.title) {
           addAiMessage("assistant", `${data.title}\n${data.summary || ""}`);
+        } else if (data.type === "stat_answer") {
+          addAiMessage("assistant", data.message || "");
+          if (data.stats && data.stats.length > 0) showInlineStats(data.stats);
+        } else if (data.type === "area_comparison") {
+          addAiMessage("assistant", data.message || "");
+          if (data.comparison && data.comparison.length > 0) showAreaComparison(data.comparison);
         } else if (data.message) {
           addAiMessage("assistant", data.message);
         } else {
@@ -1636,6 +1820,15 @@ function replayChatMessages(chat) {
   // Restore last results on map if available
   if (chat.lastResults && chat.lastResults.length > 0) {
     showAiResults(chat.lastResults);
+  }
+
+  // Restore conversation context from last assistant message
+  const lastAssistant = [...chat.messages].reverse().find(m => m.role === "assistant");
+  if (lastAssistant) {
+    try {
+      const data = JSON.parse(lastAssistant.content);
+      conversationContext = data.conversation_context || null;
+    } catch { conversationContext = null; }
   }
 }
 
@@ -1759,6 +1952,12 @@ const STARTER_OPTIONS = [
     prompt: "Find properties and areas with the lowest price per square metre in Dublin. Compare different neighborhoods and property types. Identify where floor space is cheapest relative to the Dublin average and cross-reference with development land availability.",
     reason: "Low price-per-sqm areas that are adjacent to expensive neighborhoods represent the classic 'gentrification frontier.' Developers who build quality stock in these transition zones capture the price convergence as the area improves."
   },
+  {
+    icon: "🏘️",
+    label: "Side sites & infill",
+    prompt: "Find side sites and infill development opportunities in south Dublin. Look for small parcels (80-500 sqm) with elongated shapes that sit between existing houses. Cross-reference with RZLT sites, planning history, and nearby sold property prices to score development potential.",
+    reason: "Side gardens and infill plots between existing houses are often overlooked by large developers but perfect for 1-3 unit builds. Elongated parcels with no planning history in established residential areas are the strongest candidates."
+  },
 ];
 
 function renderStarterOptions() {
@@ -1801,6 +2000,39 @@ setTimeout(() => {
   aiInput.focus();
 }, 400);
 
+// Collect current map state for AI context
+function getMapContext() {
+  const bounds = map.getBounds();
+  const ctx = {
+    viewport: {
+      sw: [bounds.getWest(), bounds.getSouth()],
+      ne: [bounds.getEast(), bounds.getNorth()],
+    },
+    zoom: Math.round(map.getZoom() * 10) / 10,
+    active_layers: [],
+    selected_entity: null,
+    circle_analysis: null,
+  };
+
+  // Collect active layers from checkboxes
+  document.querySelectorAll("#layer-list input[type='checkbox']").forEach(cb => {
+    if (cb.checked) {
+      const layerName = cb.id.replace("layer-", "");
+      if (layerName) ctx.active_layers.push(layerName);
+    }
+  });
+
+  // Circle analysis state
+  if (circleCenter && circleRadiusM) {
+    ctx.circle_analysis = {
+      center: [circleCenter.lng, circleCenter.lat],
+      radius_m: circleRadiusM,
+    };
+  }
+
+  return ctx;
+}
+
 // Send message
 async function sendAiMessage(text) {
   if (!text || !text.trim()) return;
@@ -1826,11 +2058,11 @@ async function sendAiMessage(text) {
   const loadingEl = addAiMessage("loading", "Thinking");
   aiSendBtn.classList.add("loading");
 
-  // Staged loading messages for polish
+  // Fallback staged loading timers (used if SSE status events are slow)
   const loadingStages = [
-    { text: "Forming analysis strategy", delay: 1500 },
-    { text: "Querying property database", delay: 4000 },
-    { text: "Ranking opportunities", delay: 7000 },
+    { text: "Forming analysis strategy", delay: 3000 },
+    { text: "Querying property database", delay: 8000 },
+    { text: "Ranking opportunities", delay: 14000 },
   ];
   const stageTimers = loadingStages.map(stage =>
     setTimeout(() => {
@@ -1840,10 +2072,10 @@ async function sendAiMessage(text) {
   );
 
   try {
-    const resp = await fetch(`${API}/ai/chat`, {
+    const resp = await fetch(`${API}/ai/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: aiConversation }),
+      body: JSON.stringify({ messages: aiConversation, map_context: getMapContext(), conversation_context: conversationContext }),
     });
 
     if (!resp.ok) {
@@ -1851,65 +2083,152 @@ async function sendAiMessage(text) {
       throw new Error(err.detail || `Error ${resp.status}`);
     }
 
-    const data = await resp.json();
+    // Parse SSE stream
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
 
-    // Remove loading
-    stageTimers.forEach(clearTimeout);
-    loadingEl.remove();
-    aiSendBtn.classList.remove("loading");
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    // Store response in conversation
-    aiConversation.push({ role: "assistant", content: JSON.stringify(data) });
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // keep incomplete line in buffer
 
-    // Persist chat session
-    syncCurrentChatState();
-    saveChatsToStorage();
-    renderChatList();
-
-    // Handle explore response — flat ranked results, no hypothesis switching
-    if (data.type === "explore") {
-      const summaryText = data.title
-        ? `${data.title}\n${data.summary || ""}`
-        : data.summary || data.message || "Analysis complete.";
-      addAiMessage("assistant", summaryText);
-
-      // Show query stats as a subtle indicator
-      if (data.query_stats) {
-        const stats = data.query_stats;
-        if (stats.total > 0 && stats.successful < stats.total) {
-          addAiMessage("assistant", `Ran ${stats.total} queries across the database (${stats.successful} returned results).`);
+      let eventType = null;
+      for (const line of lines) {
+        if (line.startsWith("event: ")) {
+          eventType = line.substring(7).trim();
+        } else if (line.startsWith("data: ") && eventType) {
+          try {
+            const eventData = JSON.parse(line.substring(6));
+            handleSSEEvent(eventType, eventData, loadingEl, stageTimers);
+          } catch (e) {
+            console.warn("SSE parse error:", e);
+          }
+          eventType = null;
         }
       }
+    }
 
-      if (data.results && data.results.length > 0) {
-        showAiResults(data.results);
-      } else {
-        addAiMessage("assistant", "No matching sites found for this query. Try a different area or broader criteria.");
-      }
+    // Clean up loading if still present
+    stageTimers.forEach(clearTimeout);
+    if (loadingEl.parentNode) loadingEl.remove();
+    aiSendBtn.classList.remove("loading");
 
-      if (data.follow_ups && data.follow_ups.length > 0) {
-        showAiFollowUps(data.follow_ups);
-      }
-    }
-    // Fallback for clarify
-    else if (data.type === "clarify") {
-      addAiMessage("assistant", data.message || "Let me try that differently...");
-      if (data.suggestions && data.suggestions.length > 0) {
-        showAiFollowUps(data.suggestions.map(s => ({
-          label: s.length > 30 ? s.substring(0, 28) + "…" : s,
-          prompt: s,
-        })));
-      }
-    }
-    else {
-      addAiMessage("assistant", data.message || JSON.stringify(data));
-    }
   } catch (err) {
     stageTimers.forEach(clearTimeout);
-    loadingEl.remove();
+    if (loadingEl.parentNode) loadingEl.remove();
     aiSendBtn.classList.remove("loading");
     addAiMessage("assistant", `Something went wrong: ${err.message}`);
     console.error("AI chat error:", err);
+  }
+}
+
+function handleSSEEvent(eventType, data, loadingEl, stageTimers) {
+  switch (eventType) {
+    case "status": {
+      // Update loading message with real phase info
+      stageTimers.forEach(clearTimeout);
+      const content = loadingEl.querySelector(".ai-msg-content");
+      if (content) {
+        content.innerHTML = `<span class="ai-loading-icon">&#9889;</span>${data.message || "Processing..."}<span class="ai-loading-dots"></span>`;
+      }
+      break;
+    }
+    case "intent":
+      console.log("Intent:", data.intent, data.reasoning);
+      break;
+    case "hypotheses": {
+      stageTimers.forEach(clearTimeout);
+      const content = loadingEl.querySelector(".ai-msg-content");
+      if (content) {
+        content.innerHTML = `<span class="ai-loading-icon">&#9889;</span>Testing ${data.count} hypotheses...<span class="ai-loading-dots"></span>`;
+      }
+      break;
+    }
+    case "query_complete":
+      // Could show incremental progress
+      break;
+    case "result": {
+      // Remove loading
+      stageTimers.forEach(clearTimeout);
+      if (loadingEl.parentNode) loadingEl.remove();
+      aiSendBtn.classList.remove("loading");
+
+      // Store response in conversation
+      aiConversation.push({ role: "assistant", content: JSON.stringify(data) });
+
+      // Update conversation context for follow-ups
+      if (data.conversation_context) {
+        conversationContext = data.conversation_context;
+      }
+
+      // Persist chat session
+      syncCurrentChatState();
+      saveChatsToStorage();
+      renderChatList();
+
+      // Render based on response type
+      renderAiResponse(data);
+      break;
+    }
+    case "done":
+      break;
+  }
+}
+
+function renderAiResponse(data) {
+  if (data.type === "explore") {
+    const summaryText = data.title
+      ? `${data.title}\n${data.summary || ""}`
+      : data.summary || data.message || "Analysis complete.";
+    addAiMessage("assistant", summaryText);
+
+    if (data.query_stats) {
+      const stats = data.query_stats;
+      if (stats.total > 0 && stats.successful < stats.total) {
+        addAiMessage("assistant", `Ran ${stats.total} queries across the database (${stats.successful} returned results).`);
+      }
+    }
+
+    if (data.results && data.results.length > 0) {
+      showAiResults(data.results);
+    } else {
+      addAiMessage("assistant", "No matching sites found for this query. Try a different area or broader criteria.");
+    }
+
+    if (data.follow_ups && data.follow_ups.length > 0) {
+      showAiFollowUps(data.follow_ups);
+    }
+  }
+  else if (data.type === "stat_answer") {
+    addAiMessage("assistant", data.message || "Here are the results.");
+    if (data.stats && data.stats.length > 0) {
+      showInlineStats(data.stats);
+    }
+  }
+  else if (data.type === "area_comparison") {
+    addAiMessage("assistant", data.message || "Here is the comparison.");
+    if (data.comparison && data.comparison.length > 0) {
+      showAreaComparison(data.comparison);
+    }
+    if (data.follow_ups && data.follow_ups.length > 0) {
+      showAiFollowUps(data.follow_ups);
+    }
+  }
+  else if (data.type === "clarify") {
+    addAiMessage("assistant", data.message || "Let me try that differently...");
+    if (data.suggestions && data.suggestions.length > 0) {
+      showAiFollowUps(data.suggestions.map(s => ({
+        label: s.length > 30 ? s.substring(0, 28) + "\u2026" : s,
+        prompt: s,
+      })));
+    }
+  }
+  else {
+    addAiMessage("assistant", data.message || JSON.stringify(data));
   }
 }
 
@@ -1962,6 +2281,54 @@ function showAiFollowUps(followUps) {
     });
     aiSuggestionsEl.appendChild(chip);
   });
+}
+
+function showInlineStats(stats) {
+  const container = document.createElement("div");
+  container.className = "ai-inline-stats";
+  stats.forEach(stat => {
+    const row = document.createElement("div");
+    row.className = "ai-stat-row";
+    row.innerHTML = `
+      <span class="ai-stat-label">${stat.label || ""}</span>
+      <span class="ai-stat-value">${stat.value || ""}</span>
+    `;
+    container.appendChild(row);
+  });
+  aiMessages.appendChild(container);
+  aiMessages.scrollTop = aiMessages.scrollHeight;
+}
+
+function showAreaComparison(comparison) {
+  const container = document.createElement("div");
+  container.className = "ai-comparison-table";
+
+  // Build header from first area's metrics
+  const metrics = comparison[0]?.metrics ? Object.keys(comparison[0].metrics) : [];
+  if (!metrics.length) {
+    // Fallback: just show as text
+    addAiMessage("assistant", JSON.stringify(comparison, null, 2));
+    return;
+  }
+
+  let html = '<div class="comparison-header"><div class="comparison-cell area-name">Area</div>';
+  metrics.forEach(m => {
+    const label = m.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    html += `<div class="comparison-cell">${label}</div>`;
+  });
+  html += "</div>";
+
+  comparison.forEach(area => {
+    html += `<div class="comparison-row"><div class="comparison-cell area-name">${area.area || "Unknown"}</div>`;
+    metrics.forEach(m => {
+      html += `<div class="comparison-cell">${area.metrics[m] || "\u2014"}</div>`;
+    });
+    html += "</div>";
+  });
+
+  container.innerHTML = html;
+  aiMessages.appendChild(container);
+  aiMessages.scrollTop = aiMessages.scrollHeight;
 }
 
 function showAiResults(results) {
@@ -2156,14 +2523,19 @@ function selectAiResult(idx, results) {
   if (table === "sold_properties") {
     showSoldFlyout(result);
   } else if (table === "cadastral_freehold" || table === "cadastral_leasehold") {
-    showParcelFlyout({
-      id: result.ogc_fid || result.id,
-      national_ref: result.nationalcadastralreference || result.national_ref,
-      inspire_id: result.gml_id || result.inspire_id,
-      area_sqm: result.area_sqm,
-      area_acres: result.area_sqm ? +(result.area_sqm / 4046.86).toFixed(3) : null,
-      type: table === "cadastral_freehold" ? "freehold" : "leasehold",
-    });
+    const parcelId = result.ogc_fid || result.id;
+    const pType = table === "cadastral_freehold" ? "freehold" : "leasehold";
+    fetch(`${API}/parcel/${parcelId}/enriched?parcel_type=${pType}`)
+      .then((r) => r.json())
+      .then((data) => showEnrichedParcelFlyout(data))
+      .catch(() => showParcelFlyout({
+        id: parcelId,
+        national_ref: result.nationalcadastralreference || result.national_ref,
+        inspire_id: result.gml_id || result.inspire_id,
+        area_sqm: result.area_sqm,
+        area_acres: result.area_sqm ? +(result.area_sqm / 4046.86).toFixed(3) : null,
+        type: pType,
+      }));
   } else if (table === "rzlt") {
     showRzltFlyout(result);
   } else if (table === "dlr_planning_polygons" || table === "dlr_planning_points") {

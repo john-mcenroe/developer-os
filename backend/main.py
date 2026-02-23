@@ -8,7 +8,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from db import get_conn, put_conn
@@ -17,7 +17,8 @@ from db import get_conn, put_conn
 load_dotenv(Path(__file__).parent / ".env")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.0-flash"
+# GEMINI_MODEL = "gemini-2.0-flash"  # cheaper, faster — good for testing
+GEMINI_MODEL = "gemini-3.1-pro-preview"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 
@@ -974,6 +975,156 @@ def health():
     return {"status": "ok"}
 
 
+# ── Side-site / infill detection endpoint ─────────────────────────────────────
+
+SIDE_SITE_SQL = """
+WITH candidates AS (
+    SELECT
+        f.ogc_fid,
+        f.nationalcadastralreference,
+        f.area_sqm,
+        f.geom,
+        4 * PI() * ST_Area(ST_Transform(f.geom, 2157))
+            / NULLIF(POWER(ST_Perimeter(ST_Transform(f.geom, 2157)), 2), 0)
+            AS compactness,
+        (SELECT COUNT(*) FROM cadastral_freehold n
+         WHERE n.geom && ST_Expand(f.geom, 0.0001)
+           AND ST_Touches(n.geom, f.geom)
+           AND n.ogc_fid != f.ogc_fid) AS neighbor_count
+    FROM cadastral_freehold f
+    WHERE f.geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+      AND f.area_sqm BETWEEN 80 AND 500
+),
+with_planning AS (
+    SELECT c.*,
+        EXISTS (
+            SELECT 1 FROM dlr_planning_polygons p
+            WHERE ST_Intersects(p.geom, c.geom)
+        ) AS has_planning
+    FROM candidates c
+),
+with_rzlt AS (
+    SELECT wp.*,
+        EXISTS (
+            SELECT 1 FROM rzlt r
+            WHERE ST_Intersects(r.geom, wp.geom)
+        ) AS on_rzlt
+    FROM with_planning wp
+),
+with_census AS (
+    SELECT wr.*,
+        cs.owner_occupied_pct,
+        cs.total_population,
+        cs.vacancy_rate
+    FROM with_rzlt wr
+    LEFT JOIN census_small_areas cs ON ST_Intersects(cs.geom, ST_Centroid(wr.geom))
+),
+scored AS (
+    SELECT *,
+        -- Size score: peaks at 150-350 sqm
+        CASE
+            WHEN area_sqm BETWEEN 150 AND 350 THEN 1.0
+            WHEN area_sqm BETWEEN 80 AND 150 THEN (area_sqm - 80.0) / 70.0
+            ELSE (500.0 - area_sqm) / 150.0
+        END * 0.20
+        -- Shape score: lower compactness = more elongated = higher score
+        + CASE
+            WHEN compactness < 0.3 THEN 1.0
+            WHEN compactness < 0.5 THEN (0.5 - compactness) / 0.2
+            ELSE 0.0
+        END * 0.20
+        -- Neighbor score
+        + CASE
+            WHEN neighbor_count >= 3 THEN 1.0
+            WHEN neighbor_count = 2 THEN 0.7
+            WHEN neighbor_count = 1 THEN 0.3
+            ELSE 0.0
+        END * 0.15
+        -- No planning = likely undeveloped
+        + CASE WHEN NOT has_planning THEN 1.0 ELSE 0.0 END * 0.15
+        -- RZLT = motivated seller
+        + CASE WHEN on_rzlt THEN 1.0 ELSE 0.0 END * 0.15
+        -- Residential context
+        + CASE WHEN COALESCE(owner_occupied_pct, 0) > 50 THEN 1.0 ELSE 0.3 END * 0.15
+        AS score
+    FROM with_census
+)
+SELECT
+    ogc_fid AS id,
+    nationalcadastralreference AS national_ref,
+    ROUND(area_sqm::numeric, 1) AS area_sqm,
+    ROUND(area_sqm::numeric / 4046.86, 3) AS area_acres,
+    ROUND(compactness::numeric, 3) AS compactness,
+    neighbor_count,
+    has_planning,
+    on_rzlt,
+    ROUND(COALESCE(owner_occupied_pct, 0)::numeric, 1) AS owner_occupied_pct,
+    ROUND(COALESCE(vacancy_rate, 0)::numeric, 1) AS vacancy_rate,
+    ROUND(score::numeric, 3) AS score,
+    ST_AsGeoJSON(geom)::json AS geometry,
+    ST_X(ST_Centroid(geom)) AS lng,
+    ST_Y(ST_Centroid(geom)) AS lat
+FROM scored
+WHERE score > 0.3
+ORDER BY score DESC
+LIMIT 50;
+"""
+
+
+@app.get("/api/side_sites")
+def get_side_sites(
+    bbox: str = Query(None, description="xmin,ymin,xmax,ymax"),
+    lng: float = Query(None),
+    lat: float = Query(None),
+    radius: float = Query(500, description="Radius in metres (used with lng/lat)"),
+):
+    """Detect side-site / infill development candidates within a bounding box or radius."""
+    if bbox:
+        try:
+            xmin, ymin, xmax, ymax = [float(v) for v in bbox.split(",")]
+        except (ValueError, TypeError):
+            raise HTTPException(400, "bbox must be xmin,ymin,xmax,ymax")
+    elif lng is not None and lat is not None:
+        # Convert point+radius to bbox (approximate)
+        # 1 degree lat ≈ 111,320m; 1 degree lng ≈ 111,320 * cos(lat)
+        import math
+        dlat = radius / 111320.0
+        dlng = radius / (111320.0 * math.cos(math.radians(lat)))
+        xmin, ymin = lng - dlng, lat - dlat
+        xmax, ymax = lng + dlng, lat + dlat
+    else:
+        raise HTTPException(400, "Provide either bbox or lng+lat parameters")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '30s'")
+            cur.execute(SIDE_SITE_SQL, (xmin, ymin, xmax, ymax))
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(500, f"Side site query failed: {e}")
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        props = dict(zip(cols, row))
+        geom = props.pop("geometry", None)
+        features.append({
+            "type": "Feature",
+            "geometry": geom,
+            "properties": props,
+        })
+
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "count": len(features),
+    }
+
+
 # ── AI-powered analytics (Hypothesis-Driven Explore Pipeline) ────────────────
 
 ALLOWED_TABLES = {
@@ -986,6 +1137,77 @@ SQL_BLOCKLIST = re.compile(
     r'\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY|EXECUTE|DO)\b',
     re.IGNORECASE,
 )
+
+# ── Intent Router Prompt ─────────────────────────────────────────────────────
+
+INTENT_ROUTER_PROMPT = """You are a query classifier for a Dublin property intelligence system.
+
+Classify the user's latest message into exactly ONE intent:
+
+- "site_search": User wants to find specific sites/properties/parcels matching criteria. Will show ranked results on a map. Examples: "Find RZLT sites over 1000sqm", "Where are the cheapest houses in D6?", "Show me development land near Dundrum"
+- "area_comparison": User wants to compare 2+ areas/neighborhoods by statistics. Examples: "Compare Rathmines vs Ranelagh", "Which Dublin area has the highest vacancy rate?", "How does Blackrock compare to Stillorgan for prices?"
+- "stat_question": User wants a specific statistic or factual answer, not a list of sites. Examples: "What's the average house price in Blackrock?", "How many RZLT sites are in Dublin?", "What percentage of homes in Dundrum are apartments?"
+- "site_detail": User asks about a specific known site/parcel/property by ID, reference, or exact address. Examples: "Tell me about parcel DN-123456", "What's the planning history at 15 Main St Blackrock?"
+- "clarification": Message is unclear, a greeting, off-topic, or needs more info before a query can run. Examples: "Hi", "What can you do?", "Show me the good ones", "Thanks"
+- "follow_up": User is refining or filtering previous results. Examples: "Show cheaper ones", "Do the same for Blackrock", "Filter to apartments only", "Now show me the planning history for those"
+
+RESPOND WITH VALID JSON ONLY:
+{"intent": "site_search", "reasoning": "Brief explanation of classification"}
+"""
+
+# ── Clarification Handler Prompt ─────────────────────────────────────────────
+
+CLARIFICATION_PROMPT = """You are LandOS AI, a Dublin property intelligence assistant for property developers.
+The user's message needs clarification or is a general question. Respond conversationally.
+Suggest 3 specific, actionable queries they could try.
+
+RESPONSE FORMAT (valid JSON only):
+{"message": "Your conversational response here", "suggestions": ["Find the largest RZLT sites in south Dublin", "Compare house prices in Rathmines vs Ranelagh", "What's the average price per sqm in Blackrock?"]}
+"""
+
+# ── Stat Question Handler Prompt ─────────────────────────────────────────────
+
+STAT_QUESTION_PROMPT_TEMPLATE = """You are LandOS AI. The user wants a specific statistic or factual answer about Dublin property.
+
+Write ONE PostGIS SQL query that answers their question. Return a numeric or textual result.
+
+{db_schema}
+
+CRITICAL SQL RULES:
+1. LIMIT to 50 rows max.
+2. Use NULLIF(x, 0) to prevent division by zero.
+3. Filter sale_price > 0 on sold_properties.
+4. For ST_DWithin with metre distances, cast to geography: ST_DWithin(a.geom::geography, b.geom::geography, 500)
+5. Cadastral tables (2M+ rows): ALWAYS include a spatial filter.
+6. Never use column aliases in WHERE/HAVING — repeat the expression.
+7. You do NOT need geometry columns (no ST_AsGeoJSON, no lng/lat) — this is for stats, not map display.
+
+RESPONSE FORMAT (valid JSON only):
+{{"sql": "SELECT ... your query ...", "answer_template": "Description of what the result shows"}}
+"""
+
+# ── Area Comparison Handler Prompt ───────────────────────────────────────────
+
+AREA_COMPARISON_PROMPT_TEMPLATE = """You are LandOS AI. The user wants to compare areas or neighborhoods.
+
+Write 1-3 SQL queries that gather comparative statistics for the areas mentioned.
+Each query should aggregate data (AVG, COUNT, etc.) and include an area/location grouping.
+
+{db_schema}
+
+CRITICAL SQL RULES:
+1. LIMIT to 50 rows max per query.
+2. Use NULLIF(x, 0) to prevent division by zero.
+3. Filter sale_price > 0 on sold_properties.
+4. For ST_DWithin with metre distances, cast to geography.
+5. Cadastral tables: ALWAYS include a spatial filter.
+6. Never use column aliases in WHERE/HAVING.
+7. You do NOT need geometry columns — this is for comparative stats, not map display.
+8. Group results by area/neighborhood for comparison.
+
+RESPONSE FORMAT (valid JSON only):
+{{"queries": [{{"description": "What this compares", "sql": "SELECT ..."}}]}}
+"""
 
 # ── Phase 1: Hypothesis Generation Prompt ────────────────────────────────────
 
@@ -1101,7 +1323,36 @@ POSTGIS FUNCTIONS YOU CAN USE:
 - ST_Centroid(geom) — centroid point of a polygon
 - ST_X(point), ST_Y(point) — extract coordinates from a POINT geometry
 - ST_AsGeoJSON(geom)::json — geometry as GeoJSON for frontend
-- ST_Buffer(geom::geography, distance_metres)::geometry — buffer around a geometry"""
+- ST_Buffer(geom::geography, distance_metres)::geometry — buffer around a geometry
+- ST_Perimeter(ST_Transform(geom, 2157)) — perimeter in metres (use EPSG:2157 for accuracy)
+- ST_Touches(a.geom, b.geom) — true if geometries share a boundary (adjacency detection)
+- ST_NPoints(geom) — number of vertices in a geometry
+- Compactness ratio: 4 * PI() * ST_Area(ST_Transform(geom, 2157)) / NULLIF(POWER(ST_Perimeter(ST_Transform(geom, 2157)), 2), 0) — 1.0 = circle, lower = elongated/irregular
+
+SIDE SITE / INFILL DETECTION PATTERNS:
+Side sites are small parcels (80-500 sqm) between existing houses — high-value development opportunities.
+Key signals to combine:
+- Shape: compactness ratio < 0.5 indicates elongated/irregular shape (typical of side gardens)
+- Size: area_sqm BETWEEN 80 AND 500 (large enough to build, too small for existing house+garden)
+- Adjacency: COUNT of neighboring parcels via ST_Touches >= 2 (flanked by developed plots)
+- No planning: LEFT JOIN planning tables IS NULL (no recent applications = likely undeveloped)
+- RZLT overlap: ST_Intersects with rzlt table (owner taxed 3%/year for not developing)
+- Residential context: census owner_occupied_pct > 50% in containing small area
+Example pattern:
+  WITH candidates AS (
+    SELECT f.ogc_fid, f.nationalcadastralreference, f.area_sqm, f.geom,
+      4 * PI() * ST_Area(ST_Transform(f.geom, 2157))
+        / NULLIF(POWER(ST_Perimeter(ST_Transform(f.geom, 2157)), 2), 0) AS compactness
+    FROM cadastral_freehold f
+    WHERE f.geom && ST_MakeEnvelope(xmin, ymin, xmax, ymax, 4326)
+      AND f.area_sqm BETWEEN 80 AND 500
+  )
+  SELECT c.*, ST_AsGeoJSON(c.geom)::json AS geometry,
+    ST_X(ST_Centroid(c.geom)) AS lng, ST_Y(ST_Centroid(c.geom)) AS lat
+  FROM candidates c
+  WHERE c.compactness < 0.5
+  ORDER BY c.area_sqm DESC LIMIT 25;
+NOTE: For neighbor_count, use a lateral join or subquery with ST_Touches — but always include a spatial filter on the outer table first to avoid full scans."""
 
 HYPOTHESIS_PROMPT = f"""You are LandOS AI, an expert Dublin property & land development analyst.
 The user is a property developer. They ask questions. You answer them by forming hypotheses and writing SQL to test them.
@@ -1138,12 +1389,39 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
 
 10. For cross-table spatial queries, prefer ST_DWithin over ST_Intersects for point-to-polygon distance queries.
 
+11. PRIMARY TABLE TAGGING: Every sql_queries entry MUST include a "primary_table" field set to the main table whose rows are returned.
+    Must be one of: sold_properties, cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, dlr_planning_points, census_small_areas, urban_areas.
+    For cross-table joins, use the table whose individual rows appear in the output.
+
 HYPOTHESIS GUIDELINES:
 - Each hypothesis should test a DIFFERENT angle on the user's question
 - At least one hypothesis should cross-reference 2+ tables (e.g. RZLT sites near underpriced sales)
 - At least one hypothesis should use aggregation/statistics (e.g. avg price per sqm by area)
 - Hypotheses should be specific and testable, not vague
 - If no location is specified, pick 2-3 promising Dublin areas or search city-wide
+- For side site / infill / gap site queries, use the SIDE SITE DETECTION PATTERNS above — combine shape analysis (compactness), size filtering, adjacency, planning history, and RZLT overlap
+
+QUERY PLAN OPTION (use for simple single-table queries):
+For straightforward single-table queries with filters, you may use a structured "query_plan" instead of raw SQL.
+Use raw SQL for complex cross-table joins, CTEs, window functions, or advanced spatial operations.
+Use EITHER "sql" OR "query_plan" per query, not both.
+
+Query plan format:
+{{
+  "query_plan": {{
+    "table": "sold_properties",
+    "select": ["id", "address", "sale_price", "floor_area_m2"],
+    "filters": [
+      {{"column": "sale_price", "op": ">", "value": 0}},
+      {{"column": "floor_area_m2", "op": ">", "value": 0}}
+    ],
+    "spatial_filter": {{"type": "bbox", "bounds": {{"west": -6.3, "south": 53.3, "east": -6.2, "north": 53.35}}}},
+    "order_by": "sale_price ASC",
+    "limit": 25
+  }}
+}}
+Spatial filter types: "bbox" (with bounds), "radius" (with center {{lng, lat}} and radius_m).
+Filter ops: =, >, <, >=, <=, !=, LIKE, ILIKE, IS NOT NULL, BETWEEN (value is [min, max]).
 
 RESPONSE FORMAT (valid JSON only, no markdown):
 {{
@@ -1154,6 +1432,7 @@ RESPONSE FORMAT (valid JSON only, no markdown):
       "sql_queries": [
         {{
           "description": "What this specific query tests",
+          "primary_table": "sold_properties",
           "sql": "SELECT ... full PostGIS SQL here ..."
         }}
       ]
@@ -1219,8 +1498,26 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class MapContext(BaseModel):
+    viewport: dict | None = None      # {"sw": [lng, lat], "ne": [lng, lat]}
+    zoom: float | None = None
+    active_layers: list[str] = []
+    selected_entity: dict | None = None  # {"table": str, "id": int}
+    circle_analysis: dict | None = None  # {"center": [lng, lat], "radius_m": float}
+
+
+class ConversationContext(BaseModel):
+    last_query: str | None = None
+    last_intent: str | None = None
+    last_area: str | None = None
+    last_table: str | None = None
+    last_result_count: int | None = None
+
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
+    map_context: MapContext | None = None
+    conversation_context: ConversationContext | None = None
 
 
 async def call_gemini_with_prompt(system_prompt: str, messages: list, max_tokens: int = 4096) -> dict:
@@ -1291,6 +1588,96 @@ def validate_sql(sql: str) -> str | None:
                 pass
             from_join_next = False
     return None
+
+
+POINT_TABLES = {"sold_properties", "dlr_planning_points"}
+
+
+def compile_query_plan(plan: dict) -> str:
+    """Compile a structured query plan dict into PostGIS SQL.
+
+    Handles single-table queries with filters, spatial filters, ordering, and limits.
+    Returns empty string if the plan is invalid.
+    """
+    table = plan.get("table", "")
+    if table not in ALLOWED_TABLES:
+        return ""
+
+    select_cols = plan.get("select", [])
+    filters = plan.get("filters", [])
+    spatial = plan.get("spatial_filter", {})
+    order_by = plan.get("order_by")
+    limit = min(plan.get("limit", 25), 25)
+
+    # Build SELECT columns
+    if select_cols:
+        cols = ", ".join(f"{table}.{c}" for c in select_cols)
+    else:
+        cols = f"{table}.*"
+
+    # Always add geometry columns
+    if table in POINT_TABLES:
+        geo_cols = (
+            f", ST_AsGeoJSON({table}.geom)::json AS geometry"
+            f", ST_X({table}.geom) AS lng, ST_Y({table}.geom) AS lat"
+        )
+    else:
+        geo_cols = (
+            f", ST_AsGeoJSON({table}.geom)::json AS geometry"
+            f", ST_X(ST_Centroid({table}.geom)) AS lng, ST_Y(ST_Centroid({table}.geom)) AS lat"
+        )
+
+    sql = f"SELECT {cols}{geo_cols} FROM {table}"
+
+    # Build WHERE clauses
+    where_parts = []
+
+    # Spatial filter
+    if spatial.get("type") == "bbox":
+        b = spatial.get("bounds", {})
+        where_parts.append(
+            f"{table}.geom && ST_MakeEnvelope("
+            f"{b.get('west', -6.5)}, {b.get('south', 53.2)}, "
+            f"{b.get('east', -6.0)}, {b.get('north', 53.45)}, 4326)"
+        )
+    elif spatial.get("type") == "radius":
+        center = spatial.get("center", {})
+        radius = spatial.get("radius_m", 500)
+        where_parts.append(
+            f"ST_DWithin({table}.geom::geography, "
+            f"ST_SetSRID(ST_MakePoint({center.get('lng', -6.26)}, {center.get('lat', 53.35)}), 4326)::geography, "
+            f"{radius})"
+        )
+
+    # Column filters
+    safe_ops = {"=", ">", "<", ">=", "<=", "!=", "LIKE", "ILIKE"}
+    for f in filters:
+        col = f.get("column", "")
+        op = f.get("op", "=")
+        val = f.get("value")
+        if not col or not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', col):
+            continue  # skip suspicious column names
+        if op in safe_ops and val is not None:
+            if isinstance(val, str):
+                safe_val = val.replace("'", "''")
+                where_parts.append(f"{table}.{col} {op} '{safe_val}'")
+            elif isinstance(val, (int, float)):
+                where_parts.append(f"{table}.{col} {op} {val}")
+        elif op == "IS NOT NULL":
+            where_parts.append(f"{table}.{col} IS NOT NULL")
+        elif op == "BETWEEN" and isinstance(val, list) and len(val) == 2:
+            where_parts.append(f"{table}.{col} BETWEEN {val[0]} AND {val[1]}")
+
+    if where_parts:
+        sql += " WHERE " + " AND ".join(where_parts)
+
+    if order_by:
+        # Only allow simple order_by expressions
+        sql += f" ORDER BY {order_by}"
+
+    sql += f" LIMIT {limit}"
+
+    return sql
 
 
 def execute_hypothesis_sql(sql: str) -> dict:
@@ -1368,9 +1755,82 @@ def execute_hypothesis_sql(sql: str) -> dict:
     return {"rows": rows, "error": None, "row_count": len(rows)}
 
 
-async def generate_hypotheses(messages: list[ChatMessage]) -> list[dict]:
+def format_map_context(ctx: MapContext | None) -> str:
+    """Format the user's current map state for injection into AI prompts."""
+    if not ctx:
+        return ""
+    parts = ["\nMAP CONTEXT (user's current view):"]
+    if ctx.viewport:
+        sw = ctx.viewport.get("sw", [])
+        ne = ctx.viewport.get("ne", [])
+        if len(sw) == 2 and len(ne) == 2:
+            parts.append(f"- Viewport: SW({sw[0]:.4f}, {sw[1]:.4f}) to NE({ne[0]:.4f}, {ne[1]:.4f})")
+    if ctx.zoom is not None:
+        parts.append(f"- Zoom level: {ctx.zoom}")
+    if ctx.active_layers:
+        parts.append(f"- Active layers: {', '.join(ctx.active_layers)}")
+    if ctx.circle_analysis:
+        c = ctx.circle_analysis
+        center = c.get("center", [])
+        if len(center) == 2:
+            parts.append(f"- Circle analysis active: center ({center[0]:.4f}, {center[1]:.4f}), radius {c.get('radius_m', 0)}m")
+    if ctx.selected_entity:
+        parts.append(f"- Selected entity: {ctx.selected_entity.get('table')} id={ctx.selected_entity.get('id')}")
+    parts.append("- Use viewport bounds as ST_MakeEnvelope spatial filter when the user's query is location-relative (e.g. 'around here', 'in this area', 'nearby', 'what I can see').")
+    parts.append("- If the user specifies a named location (e.g. 'Rathmines', 'Blackrock'), use that instead of viewport bounds.")
+    return "\n".join(parts)
+
+
+DUBLIN_AREAS = [
+    "Rathmines", "Ranelagh", "Blackrock", "Stillorgan", "Dundrum", "Sandyford",
+    "Dun Laoghaire", "Dalkey", "Killiney", "Foxrock", "Leopardstown", "Cabinteely",
+    "Shankill", "Bray", "Greystones", "Swords", "Malahide", "Howth", "Clontarf",
+    "Drumcondra", "Phibsborough", "Stoneybatter", "Ringsend", "Ballsbridge",
+    "Donnybrook", "Rathgar", "Terenure", "Crumlin", "Drimnagh", "Inchicore",
+    "Lucan", "Clondalkin", "Tallaght", "Blanchardstown", "Castleknock",
+    "Glasnevin", "Beaumont", "Raheny", "Sutton", "Portmarnock", "Deansgrange",
+    "Monkstown", "Booterstown", "Sandymount", "Churchtown", "Goatstown",
+]
+
+
+def extract_area_from_query(query: str) -> str | None:
+    """Extract the first Dublin area name found in a query string."""
+    query_lower = query.lower()
+    for area in DUBLIN_AREAS:
+        if area.lower() in query_lower:
+            return area
+    return None
+
+
+def format_conversation_context(ctx: ConversationContext | None) -> str:
+    """Format previous conversation state for injection into AI prompts."""
+    if not ctx or not ctx.last_query:
+        return ""
+    parts = ["\nCONVERSATION CONTEXT (previous interaction):"]
+    if ctx.last_query:
+        parts.append(f'- Last query: "{ctx.last_query}"')
+    if ctx.last_intent:
+        parts.append(f"- Last intent type: {ctx.last_intent}")
+    if ctx.last_area:
+        parts.append(f"- Last area focus: {ctx.last_area}")
+    if ctx.last_table:
+        parts.append(f"- Last primary data source: {ctx.last_table}")
+    if ctx.last_result_count is not None:
+        parts.append(f"- Last result count: {ctx.last_result_count}")
+    parts.append('- Use this context to interpret follow-up queries like "show cheaper ones", "do the same for X", "filter to apartments".')
+    return "\n".join(parts)
+
+
+async def generate_hypotheses(messages: list[ChatMessage], map_context: MapContext | None = None, conv_context: ConversationContext | None = None) -> list[dict]:
     """Phase 1: Ask Gemini to form hypotheses and write SQL."""
-    result = await call_gemini_with_prompt(HYPOTHESIS_PROMPT, messages, max_tokens=4096)
+    prompt = HYPOTHESIS_PROMPT
+    context_text = format_map_context(map_context)
+    conv_text = format_conversation_context(conv_context)
+    if context_text:
+        prompt = prompt + context_text
+    if conv_text:
+        prompt = prompt + conv_text
+    result = await call_gemini_with_prompt(prompt, messages, max_tokens=4096)
     hypotheses = result.get("hypotheses", [])
     if not hypotheses:
         # Fallback: wrap the whole response as a single hypothesis
@@ -1380,6 +1840,149 @@ async def generate_hypotheses(messages: list[ChatMessage]) -> list[dict]:
             "sql_queries": [],
         }]
     return hypotheses
+
+
+# ── Intent Router & Handlers ─────────────────────────────────────────────────
+
+async def route_intent(messages: list[ChatMessage]) -> dict:
+    """Lightweight Gemini call to classify user intent."""
+    result = await call_gemini_with_prompt(
+        INTENT_ROUTER_PROMPT,
+        messages,
+        max_tokens=256,
+    )
+    intent = result.get("intent", "site_search")
+    valid_intents = {"site_search", "area_comparison", "stat_question", "site_detail", "clarification", "follow_up"}
+    if intent not in valid_intents:
+        intent = "site_search"  # safe fallback
+    return {"intent": intent, "reasoning": result.get("reasoning", "")}
+
+
+async def handle_clarification(messages: list[ChatMessage]) -> dict:
+    """Handle unclear/greeting messages with a conversational response."""
+    result = await call_gemini_with_prompt(CLARIFICATION_PROMPT, messages, max_tokens=512)
+    suggestions = result.get("suggestions", [])
+    if not suggestions:
+        suggestions = [
+            "Find the largest RZLT sites in south Dublin",
+            "What's the average house price in Blackrock?",
+            "Compare Rathmines vs Ranelagh for property prices",
+        ]
+    return {
+        "type": "clarify",
+        "message": result.get("message", "I'm LandOS AI — I help property developers find and research sites across Dublin. What would you like to explore?"),
+        "suggestions": suggestions,
+    }
+
+
+async def handle_stat_question(messages: list[ChatMessage], map_context: MapContext | None = None, conv_context: ConversationContext | None = None) -> dict:
+    """Handle factual/statistical questions with a single query + conversational answer."""
+    prompt = STAT_QUESTION_PROMPT_TEMPLATE.format(db_schema=DB_SCHEMA_PROMPT)
+    context_text = format_map_context(map_context)
+    conv_text = format_conversation_context(conv_context)
+    if context_text:
+        prompt += context_text
+    if conv_text:
+        prompt += conv_text
+
+    result = await call_gemini_with_prompt(prompt, messages, max_tokens=1024)
+
+    sql = result.get("sql", "")
+    if not sql.strip():
+        return {"type": "stat_answer", "message": "I couldn't form a query for that. Try rephrasing?", "stats": []}
+
+    query_result = execute_hypothesis_sql(sql)
+    if query_result.get("error"):
+        return {"type": "stat_answer", "message": f"Query failed: {query_result['error'][:200]}. Try rephrasing your question.", "stats": []}
+
+    rows = query_result.get("rows", [])
+    if not rows:
+        return {"type": "stat_answer", "message": "No data found for that query. Try a different area or broader criteria.", "stats": []}
+
+    # Pass results back to Gemini for a natural language answer
+    user_query = messages[-1].content if messages else ""
+    answer_prompt = f"""The user asked: {user_query}
+
+Query results: {json.dumps(rows[:15], default=str)[:3000]}
+
+Write a concise, conversational answer using these results. Include specific numbers.
+If there are key metrics, include them in the stats array.
+
+RESPONSE FORMAT (valid JSON only):
+{{"message": "Your conversational answer with specific numbers", "stats": [{{"label": "Metric name", "value": "Formatted value"}}]}}"""
+
+    answer = await call_gemini_with_prompt(
+        answer_prompt,
+        [{"role": "user", "content": "Summarize these results."}],
+        max_tokens=512,
+    )
+
+    return {
+        "type": "stat_answer",
+        "message": answer.get("message", json.dumps(rows[:5], default=str)),
+        "stats": answer.get("stats", []),
+        "query_stats": {"total": 1, "successful": 0 if query_result.get("error") else 1},
+    }
+
+
+async def handle_area_comparison(messages: list[ChatMessage], map_context: MapContext | None = None, conv_context: ConversationContext | None = None) -> dict:
+    """Handle area-vs-area comparison queries."""
+    prompt = AREA_COMPARISON_PROMPT_TEMPLATE.format(db_schema=DB_SCHEMA_PROMPT)
+    context_text = format_map_context(map_context)
+    conv_text = format_conversation_context(conv_context)
+    if context_text:
+        prompt += context_text
+    if conv_text:
+        prompt += conv_text
+
+    result = await call_gemini_with_prompt(prompt, messages, max_tokens=2048)
+    queries = result.get("queries", [])
+
+    all_rows = []
+    total = 0
+    successful = 0
+    for q in queries:
+        sql = q.get("sql", "")
+        if sql.strip():
+            q["result"] = execute_hypothesis_sql(sql)
+            total += 1
+            if not q["result"].get("error"):
+                successful += 1
+                all_rows.extend(q["result"]["rows"])
+
+    if not all_rows:
+        return {
+            "type": "area_comparison",
+            "message": "Couldn't find enough data to compare those areas. Try being more specific about which areas to compare.",
+            "comparison": [],
+            "follow_ups": [],
+        }
+
+    # Synthesize comparison answer
+    user_query = messages[-1].content if messages else ""
+    comparison_prompt = f"""The user asked: {user_query}
+
+Query results: {json.dumps(all_rows[:30], default=str)[:3000]}
+
+Write a comparison summary. Highlight which area is stronger and why.
+Structure the comparison data so each area has the same metrics.
+
+RESPONSE FORMAT (valid JSON only):
+{{"message": "2-3 sentence summary highlighting the key differences", "comparison": [{{"area": "Area Name", "metrics": {{"avg_price": "€450,000", "price_per_sqm": "€4,200", "num_sales": "142"}}}}], "follow_ups": [{{"label": "Short label", "prompt": "Full follow-up question"}}]}}"""
+
+    answer = await call_gemini_with_prompt(
+        comparison_prompt,
+        [{"role": "user", "content": "Compare these areas."}],
+        max_tokens=1024,
+    )
+
+    return {
+        "type": "area_comparison",
+        "message": answer.get("message", ""),
+        "comparison": answer.get("comparison", []),
+        "follow_ups": answer.get("follow_ups", []),
+        "query_stats": {"total": total, "successful": successful},
+    }
 
 
 async def evaluate_hypotheses(user_query: str, hypotheses: list[dict]) -> dict:
@@ -1487,7 +2090,12 @@ def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
 
         row["opportunity_reason"] = reason
         row["_score"] = score
-        row["_table"] = infer_table(row)
+        # Use tagged primary_table from Phase 1, fall back to inference
+        try:
+            tagged_table = hypotheses[h_idx]["sql_queries"][q_idx].get("primary_table")
+        except (IndexError, KeyError):
+            tagged_table = None
+        row["_table"] = tagged_table if tagged_table in ALLOWED_TABLES else infer_table(row)
         row["_rank"] = rank
         results.append(row)
 
@@ -1501,7 +2109,7 @@ def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
                     extract_coords_from_geometry(row)
                     if not row.get("lng") and not row.get("lat"):
                         continue
-                    row["_table"] = infer_table(row)
+                    row["_table"] = q.get("primary_table") if q.get("primary_table") in ALLOWED_TABLES else infer_table(row)
                     row["_rank"] = len(results)
                     row["_score"] = 50  # default for fallback
                     results.append(row)
@@ -1517,11 +2125,13 @@ def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
 
 @app.post("/api/ai/chat")
 async def ai_chat(req: ChatRequest):
-    """AI-powered property analytics chat.
+    """AI-powered property analytics chat with intent routing.
 
-    Phase 1: Gemini forms 3-5 hypotheses and writes SQL for each.
-    Phase 2: Execute all SQL queries safely against PostGIS.
-    Phase 3: Gemini ranks the best sites into a flat list for the map.
+    Routes queries to specialized handlers based on intent classification:
+    - site_search/follow_up/site_detail → 3-phase hypothesis pipeline
+    - stat_question → single query + conversational answer
+    - area_comparison → aggregation queries + comparison table
+    - clarification → conversational response + suggestions
     """
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
@@ -1533,15 +2143,56 @@ async def ai_chat(req: ChatRequest):
             user_query = msg.content
             break
 
-    # Phase 1: Generate hypotheses + SQL
-    hypotheses = await generate_hypotheses(req.messages)
+    # Step 1: Route intent
+    routing = await route_intent(req.messages)
+    intent = routing["intent"]
 
-    # Phase 2: Execute all SQL queries safely
+    conv_ctx = req.conversation_context
+
+    # Helper to build conversation_context for the response
+    def build_response_context(result_count=0, table=None):
+        return {
+            "last_query": user_query,
+            "last_intent": intent,
+            "last_area": extract_area_from_query(user_query),
+            "last_table": table,
+            "last_result_count": result_count,
+        }
+
+    # Step 2: Dispatch to handler based on intent
+    if intent == "clarification":
+        resp = await handle_clarification(req.messages)
+        resp["conversation_context"] = build_response_context()
+        return resp
+
+    if intent == "stat_question":
+        resp = await handle_stat_question(req.messages, req.map_context, conv_ctx)
+        resp["conversation_context"] = build_response_context()
+        return resp
+
+    if intent == "area_comparison":
+        resp = await handle_area_comparison(req.messages, req.map_context, conv_ctx)
+        resp["conversation_context"] = build_response_context(
+            result_count=len(resp.get("comparison", [])),
+        )
+        return resp
+
+    # site_search, follow_up, site_detail → full 3-phase hypothesis pipeline
+    hypotheses = await generate_hypotheses(req.messages, req.map_context, conv_ctx)
+
+    # Phase 2: Execute all SQL queries safely (supports both raw SQL and query plans)
     total_queries = 0
     successful_queries = 0
     for hypothesis in hypotheses:
         for query in hypothesis.get("sql_queries", []):
             sql = query.get("sql", "")
+            query_plan = query.get("query_plan")
+
+            # Compile query plan to SQL if no raw SQL provided
+            if query_plan and not sql.strip():
+                sql = compile_query_plan(query_plan)
+                query["sql"] = sql  # store compiled SQL for debugging/evaluation
+
             if sql.strip():
                 query["result"] = execute_hypothesis_sql(sql)
                 total_queries += 1
@@ -1554,7 +2205,7 @@ async def ai_chat(req: ChatRequest):
     # Build the flat results array with geometry for the frontend map
     results = build_flat_results(hypotheses, evaluation)
 
-    # Return clean response (no hypotheses exposed to frontend)
+    # Return clean response
     return {
         "type": "explore",
         "title": evaluation.get("title", "Analysis Results"),
@@ -1565,4 +2216,153 @@ async def ai_chat(req: ChatRequest):
             "total": total_queries,
             "successful": successful_queries,
         },
+        "intent": intent,
+        "conversation_context": build_response_context(
+            result_count=len(results),
+            table=results[0].get("_table") if results else None,
+        ),
     }
+
+
+@app.post("/api/ai/chat/stream")
+async def ai_chat_stream(req: ChatRequest):
+    """SSE streaming version of the AI chat endpoint.
+
+    Sends real-time progress events as the pipeline executes:
+    - status: phase updates (routing, hypotheses, executing, ranking)
+    - intent: classification result
+    - hypotheses: count and names of generated hypotheses
+    - query_complete: per-query progress
+    - result: final response payload
+    - done: stream complete
+    """
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
+
+    async def event_stream():
+        def sse(event_type: str, data: dict) -> str:
+            return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
+
+        user_query = ""
+        for msg in reversed(req.messages):
+            if msg.role == "user":
+                user_query = msg.content
+                break
+
+        conv_ctx = req.conversation_context
+
+        def build_response_context(result_count=0, table=None):
+            return {
+                "last_query": user_query,
+                "last_intent": None,
+                "last_area": extract_area_from_query(user_query),
+                "last_table": table,
+                "last_result_count": result_count,
+            }
+
+        # Step 1: Route intent
+        yield sse("status", {"phase": "routing", "message": "Classifying query..."})
+        try:
+            routing = await route_intent(req.messages)
+        except Exception:
+            routing = {"intent": "site_search", "reasoning": "fallback"}
+        intent = routing["intent"]
+        yield sse("intent", {"intent": intent, "reasoning": routing.get("reasoning", "")})
+
+        # Update context builder with intent
+        def build_response_context_with_intent(result_count=0, table=None):
+            return {
+                "last_query": user_query,
+                "last_intent": intent,
+                "last_area": extract_area_from_query(user_query),
+                "last_table": table,
+                "last_result_count": result_count,
+            }
+
+        # Handle non-explore intents quickly
+        if intent == "clarification":
+            yield sse("status", {"phase": "responding", "message": "Thinking..."})
+            resp = await handle_clarification(req.messages)
+            resp["conversation_context"] = build_response_context_with_intent()
+            yield sse("result", resp)
+            yield sse("done", {})
+            return
+
+        if intent == "stat_question":
+            yield sse("status", {"phase": "querying", "message": "Running query..."})
+            resp = await handle_stat_question(req.messages, req.map_context, conv_ctx)
+            resp["conversation_context"] = build_response_context_with_intent()
+            yield sse("result", resp)
+            yield sse("done", {})
+            return
+
+        if intent == "area_comparison":
+            yield sse("status", {"phase": "querying", "message": "Comparing areas..."})
+            resp = await handle_area_comparison(req.messages, req.map_context, conv_ctx)
+            resp["conversation_context"] = build_response_context_with_intent(
+                result_count=len(resp.get("comparison", [])),
+            )
+            yield sse("result", resp)
+            yield sse("done", {})
+            return
+
+        # Explore pipeline
+        yield sse("status", {"phase": "hypotheses", "message": "Forming analysis strategy..."})
+        hypotheses = await generate_hypotheses(req.messages, req.map_context, conv_ctx)
+        yield sse("hypotheses", {
+            "count": len(hypotheses),
+            "names": [h.get("name", "") for h in hypotheses],
+        })
+
+        # Phase 2: Execute SQL
+        yield sse("status", {"phase": "executing", "message": "Querying property database..."})
+        total_queries = 0
+        successful_queries = 0
+        for h_idx, hypothesis in enumerate(hypotheses):
+            for q_idx, query in enumerate(hypothesis.get("sql_queries", [])):
+                sql = query.get("sql", "")
+                query_plan = query.get("query_plan")
+                if query_plan and not sql.strip():
+                    sql = compile_query_plan(query_plan)
+                    query["sql"] = sql
+                if sql.strip():
+                    query["result"] = execute_hypothesis_sql(sql)
+                    total_queries += 1
+                    if not query["result"].get("error"):
+                        successful_queries += 1
+                        yield sse("query_complete", {
+                            "hypothesis_index": h_idx,
+                            "query_index": q_idx,
+                            "row_count": query["result"]["row_count"],
+                            "description": query.get("description", ""),
+                        })
+
+        # Phase 3: Rank
+        yield sse("status", {"phase": "ranking", "message": "Ranking opportunities..."})
+        evaluation = await evaluate_hypotheses(user_query, hypotheses)
+        results = build_flat_results(hypotheses, evaluation)
+
+        yield sse("result", {
+            "type": "explore",
+            "title": evaluation.get("title", "Analysis Results"),
+            "summary": evaluation.get("summary", "Analysis complete."),
+            "results": results,
+            "follow_ups": evaluation.get("follow_ups", []),
+            "query_stats": {"total": total_queries, "successful": successful_queries},
+            "intent": intent,
+            "conversation_context": build_response_context_with_intent(
+                result_count=len(results),
+                table=results[0].get("_table") if results else None,
+            ),
+        })
+        yield sse("done", {})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
