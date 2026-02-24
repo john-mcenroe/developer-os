@@ -19,7 +19,7 @@ load_dotenv(Path(__file__).parent / ".env")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # GEMINI_MODEL = "gemini-2.0-flash"  # cheaper, faster — good for testing
 # GEMINI_MODEL = "gemini-3.1-pro-preview"
-GEMINI_MODEL = "gemini-3.0-flash"
+GEMINI_MODEL = "gemini-3-flash-preview"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 
@@ -2415,7 +2415,12 @@ async def ai_chat_stream(req: ChatRequest):
 
         # Explore pipeline
         yield sse("status", {"phase": "hypotheses", "message": "Forming analysis strategy..."})
-        hypotheses = await generate_hypotheses(req.messages, req.map_context, conv_ctx)
+        try:
+            hypotheses = await generate_hypotheses(req.messages, req.map_context, conv_ctx)
+        except Exception as e:
+            yield sse("error", {"message": f"Failed to generate hypotheses: {e}"})
+            yield sse("done", {})
+            return
         yield sse("hypotheses", {
             "count": len(hypotheses),
             "names": [h.get("name", "") for h in hypotheses],
@@ -2446,7 +2451,12 @@ async def ai_chat_stream(req: ChatRequest):
 
         # Phase 3: Rank
         yield sse("status", {"phase": "ranking", "message": "Ranking opportunities..."})
-        evaluation = await evaluate_hypotheses(user_query, hypotheses)
+        try:
+            evaluation = await evaluate_hypotheses(user_query, hypotheses)
+        except Exception as e:
+            yield sse("error", {"message": f"Failed to rank results: {e}"})
+            yield sse("done", {})
+            return
         results = build_flat_results(hypotheses, evaluation)
 
         yield sse("result", {

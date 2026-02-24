@@ -2364,6 +2364,13 @@ function handleSSEEvent(eventType, data, loadingEl, stageTimers) {
       renderAiResponse(data);
       break;
     }
+    case "error": {
+      stageTimers.forEach(clearTimeout);
+      if (loadingEl.parentNode) loadingEl.remove();
+      aiSendBtn.classList.remove("loading");
+      addAiMessage("assistant", `Something went wrong: ${data.message || "Unknown error"}`);
+      break;
+    }
     case "done":
       break;
   }

@@ -49,7 +49,7 @@ cd backend && python main.py      # Start API (port 8000)
 | RZLT Sites | `rzlt` | Local Authorities | ~4k sites | ✅ Live |
 | DLR Planning (Polygons) | `dlr_planning_polygons` | Dublin City Council | ~15k features | ✅ Live |
 | DLR Planning (Points) | `dlr_planning_points` | Dublin City Council | ~15k features | ✅ Live |
-| Sold Properties | `sold_properties` | Scraped listings | ~50k properties | ✅ Live |
+| Sold Properties | `sold_properties` | Property Price Register (PPR) + scraped listings | ~50k properties | ✅ Live |
 | Census Small Areas | `census_small_areas` | CSO Census 2022 | ~4.6k Dublin areas | ✅ Live |
 | Urban Area Boundaries | `urban_areas` | Tailte Éireann | ~11 Dublin areas | ✅ Live |
 
@@ -124,7 +124,7 @@ LandOS is evolving toward **"Claude Code for developers exploring a map"** — a
 
 **Data layers that attach to entities:**
 - Parcels of land (cadastral boundaries) ✅
-- Sold properties (scraped listings with price/beds/baths/energy) ✅
+- Sold properties (PPR + scraped listings with price/beds/baths/energy) ✅
 - Planning permissions (DLR applications with decisions) ✅
 - RZLT sites (motivated seller signal — 3% annual tax) ✅
 - Census data (demographics, tenure, education, employment) ✅
