@@ -319,6 +319,82 @@ map.on("load", () => {
     },
   });
 
+  // SD Local Area Plan Boundaries — purple outlines
+  map.addSource("sd-lap-boundaries", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+
+  map.addLayer({
+    id: "sd_lap_boundaries-fill",
+    type: "fill",
+    source: "sd-lap-boundaries",
+    layout: { visibility: "none" },
+    paint: {
+      "fill-color": "rgba(155, 89, 182, 0.1)",
+      "fill-outline-color": "rgba(155, 89, 182, 0)",
+    },
+  });
+
+  map.addLayer({
+    id: "sd_lap_boundaries-outline",
+    type: "line",
+    source: "sd-lap-boundaries",
+    layout: { visibility: "none" },
+    paint: {
+      "line-color": "#9b59b6",
+      "line-width": 2.5,
+      "line-dasharray": [6, 3],
+    },
+  });
+
+  // SD Planning Register — orange polygons
+  map.addSource("sd-planning-register", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+
+  map.addLayer({
+    id: "sd_planning_register-fill",
+    type: "fill",
+    source: "sd-planning-register",
+    paint: {
+      "fill-color": [
+        "match", ["coalesce", ["get", "status"], ""],
+        "Grant", "#2ecc71",
+        "Refuse", "#e74c3c",
+        "#e67e22",
+      ],
+      "fill-opacity": 0.25,
+    },
+  });
+
+  map.addLayer({
+    id: "sd_planning_register-outline",
+    type: "line",
+    source: "sd-planning-register",
+    paint: {
+      "line-color": [
+        "match", ["coalesce", ["get", "status"], ""],
+        "Grant", "#2ecc71",
+        "Refuse", "#e74c3c",
+        "#e67e22",
+      ],
+      "line-width": 2,
+    },
+  });
+
+  map.addLayer({
+    id: "sd_planning_register-selected",
+    type: "fill",
+    source: "sd-planning-register",
+    filter: ["==", ["id"], -1],
+    paint: {
+      "fill-color": "rgba(230, 126, 34, 0.45)",
+      "fill-outline-color": "#d35400",
+    },
+  });
+
   // Side Sites — yellow/gold for infill opportunities
   map.addSource("side-sites", {
     type: "geojson",
@@ -506,6 +582,31 @@ function loadParcels() {
       .catch((err) => console.error("Failed to load urban areas:", err));
   }
 
+  // SD LAP Boundaries (all zoom levels when visible)
+  if (isLayerVisible("sd_lap_boundaries")) {
+    fetch(`${API}/lap_boundaries?bbox=${bbox}`)
+      .then((r) => r.json())
+      .then((geojson) => {
+        const src = map.getSource("sd-lap-boundaries");
+        if (src) src.setData(geojson);
+      })
+      .catch((err) => console.error("Failed to load SD LAP boundaries:", err));
+  }
+
+  // SD Planning Register (zoom 13+)
+  if (zoom >= 13 && isLayerVisible("sd_planning_register")) {
+    fetch(`${API}/sd_planning_register?bbox=${bbox}`)
+      .then((r) => r.json())
+      .then((geojson) => {
+        const src = map.getSource("sd-planning-register");
+        if (src) src.setData(geojson);
+      })
+      .catch((err) => console.error("Failed to load SD planning register:", err));
+  } else if (zoom < 13) {
+    const srcSD = map.getSource("sd-planning-register");
+    if (srcSD) srcSD.setData({ type: "FeatureCollection", features: [] });
+  }
+
   // Sold Properties — points (zoom 13+)
   if (zoom >= 13 && isLayerVisible("sold_properties")) {
     fetch(`${API}/sold_properties?bbox=${bbox}`)
@@ -650,6 +751,28 @@ map.on("load", () => {
   setupSoldPropertyClick();
   setupCensusClick();
   setupSideSiteClick();
+
+  // SD LAP Boundaries click
+  map.on("click", "sd_lap_boundaries-fill", (e) => {
+    if (circleMode) return;
+    if (!e.features || e.features.length === 0) return;
+    showLapBoundaryFlyout(e.features[0].properties);
+  });
+  map.on("mouseenter", "sd_lap_boundaries-fill", () => { map.getCanvas().style.cursor = "pointer"; });
+  map.on("mouseleave", "sd_lap_boundaries-fill", () => { map.getCanvas().style.cursor = ""; });
+
+  // SD Planning Register click
+  map.on("click", "sd_planning_register-fill", (e) => {
+    if (circleMode) return;
+    if (!e.features || e.features.length === 0) return;
+    const feature = e.features[0];
+    if (map.getLayer("sd_planning_register-selected")) {
+      map.setFilter("sd_planning_register-selected", ["==", ["id"], feature.id]);
+    }
+    showSdPlanningFlyout(feature.properties);
+  });
+  map.on("mouseenter", "sd_planning_register-fill", () => { map.getCanvas().style.cursor = "pointer"; });
+  map.on("mouseleave", "sd_planning_register-fill", () => { map.getCanvas().style.cursor = ""; });
 });
 
 // ── Side site click handler ──────────────────────────────────────────────────
@@ -1114,6 +1237,73 @@ function showSoldFlyout(data) {
   `;
 
   openFlyout("Sold Property");
+}
+
+function showLapBoundaryFlyout(data) {
+  const link = data.hyperlink && data.hyperlink !== "(null)"
+    ? `<a href="${data.hyperlink}" target="_blank" rel="noopener" style="color:#9b59b6;word-break:break-all;">View LAP Document</a>`
+    : "—";
+
+  flyoutContent.innerHTML = `
+    <div class="detail-row">
+      <div class="detail-label">Objective</div>
+      <div class="detail-value large" style="color:#9b59b6;font-size:0.9em;line-height:1.4">${data.objective || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Type</div>
+      <div class="detail-value">${data.feature_type || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Map Number</div>
+      <div class="detail-value">${data.map_number || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Area</div>
+      <div class="detail-value">${data.area_ha ? `${Number(data.area_ha).toFixed(1)} ha` : "—"}</div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label">Document</div>
+      <div class="detail-value">${link}</div>
+    </div>
+  `;
+  openFlyout("Local Area Plan Boundary");
+}
+
+function showSdPlanningFlyout(data) {
+  const statusColor =
+    (data.status || "").toLowerCase().includes("grant") ? "#2ecc71" :
+    (data.status || "").toLowerCase().includes("refus") ? "#e74c3c" : "#e67e22";
+
+  const link = data.link && data.link !== "(null)"
+    ? `<a href="${data.link}" target="_blank" rel="noopener" style="color:#3498db;word-break:break-all;">View Application</a>`
+    : "—";
+
+  flyoutContent.innerHTML = `
+    <div class="detail-row">
+      <div class="detail-label">Ref</div>
+      <div class="detail-value large" style="color:#e67e22">${data.ref || data.regref || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Status</div>
+      <div class="detail-value" style="color:${statusColor}">${data.status || "—"}</div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label">Location</div>
+      <div class="detail-value">${data.location || "—"}</div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-label">Applicant</div>
+      <div class="detail-value">${data.applicant_name || "—"}</div>
+    </div>
+    <hr>
+    <div class="detail-row">
+      <div class="detail-label">More Info</div>
+      <div class="detail-value">${link}</div>
+    </div>
+  `;
+  openFlyout("SD Planning Register");
 }
 
 function showRzltFlyout(data) {

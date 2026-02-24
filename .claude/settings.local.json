@@ -15,7 +15,8 @@
       "Bash(head:*)",
       "Bash(wc:*)",
       "Bash(bash scripts/load_census.sh)",
-      "Bash(xargs kill:*)"
+      "Bash(xargs kill:*)",
+      "Bash(ls:*)"
     ]
   }
 }

@@ -18,7 +18,8 @@ load_dotenv(Path(__file__).parent / ".env")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # GEMINI_MODEL = "gemini-2.0-flash"  # cheaper, faster — good for testing
-GEMINI_MODEL = "gemini-3.1-pro-preview"
+# GEMINI_MODEL = "gemini-3.1-pro-preview"
+GEMINI_MODEL = "gemini-3.0-flash"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 
@@ -468,6 +469,112 @@ def get_planning_apps_points(bbox: str = Query(..., description="west,south,east
     except ValueError:
         raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
     features = query_planning_apps_bbox("dlr_planning_points", west, south, east, north)
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
+@app.get("/api/lap_boundaries")
+def get_lap_boundaries(bbox: str = Query(..., description="west,south,east,north")):
+    """Return South Dublin Local Area Plan boundaries as GeoJSON."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    ogc_fid AS id,
+                    objective,
+                    map_number,
+                    feature_type1 AS feature_type,
+                    hyperlink,
+                    area__ha_ AS area_ha,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM sd_lap_boundaries
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 500
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        fid, objective, map_number, feature_type, hyperlink, area_ha, geometry = row
+        features.append(
+            {
+                "type": "Feature",
+                "id": fid,
+                "geometry": geometry,
+                "properties": {
+                    "id": fid,
+                    "objective": objective,
+                    "map_number": map_number,
+                    "feature_type": feature_type,
+                    "hyperlink": hyperlink,
+                    "area_ha": float(area_ha) if area_ha else None,
+                },
+            }
+        )
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
+@app.get("/api/sd_planning_register")
+def get_sd_planning_register(bbox: str = Query(..., description="west,south,east,north")):
+    """Return South Dublin Planning Register applications within the bounding box as GeoJSON."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    ogc_fid AS id,
+                    ref,
+                    regref,
+                    link,
+                    location,
+                    applicantname AS applicant_name,
+                    status,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM sd_planning_register
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 2000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        fid, ref, regref, link, location, applicant_name, status, geometry = row
+        features.append(
+            {
+                "type": "Feature",
+                "id": fid,
+                "geometry": geometry,
+                "properties": {
+                    "id": fid,
+                    "ref": ref,
+                    "regref": regref,
+                    "link": link,
+                    "location": location,
+                    "applicant_name": (applicant_name or "").strip() or None,
+                    "status": status,
+                },
+            }
+        )
     return JSONResponse({"type": "FeatureCollection", "features": features})
 
 
