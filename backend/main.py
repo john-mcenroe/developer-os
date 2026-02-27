@@ -1597,6 +1597,86 @@ RULES:
 - "reason" should be developer-actionable: mention price, area, tax pressure, planning status etc.
 - "follow_ups" should have exactly 3 entries.
 - If no queries returned useful results, set sites to [] and explain in summary what the developer should try instead.
+
+VISUALIZATION SELECTION:
+After selecting sites, choose the best map visualization type for this data. Add these fields to your JSON:
+
+"object_type": one of:
+  - "markers" — ranked numbered pins (DEFAULT for most queries — specific sites, addresses, individual properties)
+  - "polygon_highlights" — colored parcel/zone boundaries (use when primary_table is cadastral_freehold, cadastral_leasehold, rzlt, or dlr_planning_polygons AND geometry column is present in results — lets developer see actual parcel shapes)
+  - "heatmap" — heat density overlay (use when results are 15+ point observations and the insight is WHERE concentration is highest, e.g. price hotspots, planning activity density)
+  - "choropleth" — area polygons colored by metric (use when results are census_small_areas or urban_areas and a single normalized metric like vacancy_rate, apartment_pct, or employment_rate tells the story)
+
+"available_views": array of view types valid for this dataset. Always include "markers" as a fallback (as long as lng/lat exist). Example: ["polygon_highlights", "markers"] or ["heatmap", "markers"] or ["choropleth", "markers"]
+
+"choropleth_metric": string column name (e.g. "vacancy_rate", "apartment_pct") — ONLY set when object_type is "choropleth", otherwise null
+
+"heatmap_weight_column": string column name (e.g. "sale_price", "_score", "site_area") — ONLY set when object_type is "heatmap", otherwise null
+
+Add these 4 fields to your JSON response at the top level.
+"""
+
+# ── Agentic Loop: SQL Retry & Broaden Prompts ─────────────────────────────────
+
+SQL_RETRY_PROMPT = """You are a PostGIS SQL expert fixing a broken query for a Dublin property intelligence system.
+
+ORIGINAL QUERY:
+{original_sql}
+
+ERROR:
+{error_message}
+
+{db_schema}
+
+SQL RULES:
+- Always SELECT ST_AsGeoJSON(geometry) AS geometry for spatial columns
+- Table/column names are lowercase
+- Use ST_Transform(geometry, 2157) for area/distance calculations (Irish TM)
+- Always include a geometry column in results
+- LIMIT 25 max
+- READ ONLY — no INSERT/UPDATE/DELETE
+
+Return valid JSON only:
+{{"corrected_sql": "SELECT ...", "explanation": "brief description of what you fixed"}}
+"""
+
+SQL_BROADEN_PROMPT = """You are a PostGIS SQL expert. A query returned 0 results and needs to be broadened.
+
+ORIGINAL QUERY:
+{original_sql}
+
+QUERY INTENT: {description}
+
+{db_schema}
+
+The query returned no rows. Broaden it by:
+1. Relaxing geographic constraints (larger area, remove neighborhood filter)
+2. Relaxing numeric thresholds (lower minimums, higher maximums)
+3. Removing the most restrictive WHERE clause
+4. If searching a specific area, try Dublin-wide instead
+
+Keep the same SELECT columns and geometry. LIMIT 25.
+
+Return valid JSON only:
+{{"corrected_sql": "SELECT ...", "explanation": "brief description of what you relaxed"}}
+"""
+
+FALLBACK_HYPOTHESIS_PROMPT = """You are LandOS AI. A property search query returned very few results. Generate ONE simple, broad PostGIS query to find relevant results.
+
+USER QUERY: {user_query}
+
+{db_schema}
+
+SQL RULES:
+- Always SELECT ST_AsGeoJSON(geometry) AS geometry
+- Table/column names are lowercase
+- Use ST_Transform(geometry, 2157) for area/distance
+- LIMIT 25
+- Keep it simple — one table, minimal WHERE clauses
+- Focus on the most relevant table for the user's intent
+
+Return valid JSON only:
+{{"name": "Broad fallback search", "rationale": "Simplified search to find more results", "sql_queries": [{{"description": "...", "sql": "SELECT ..."}}]}}
 """
 
 
@@ -1949,6 +2029,43 @@ async def generate_hypotheses(messages: list[ChatMessage], map_context: MapConte
     return hypotheses
 
 
+# ── Agentic Loop: Retry, Broaden, Fallback ───────────────────────────────────
+
+async def retry_failed_sql(original_sql: str, error_msg: str) -> dict:
+    """Ask Gemini to fix a failed SQL query. Returns {corrected_sql, explanation}."""
+    prompt = SQL_RETRY_PROMPT.format(
+        original_sql=original_sql,
+        error_message=error_msg,
+        db_schema=DB_SCHEMA_PROMPT,
+    )
+    messages = [{"role": "user", "content": "Fix this SQL query."}]
+    return await call_gemini_with_prompt(prompt, messages, max_tokens=1024)
+
+
+async def broaden_empty_sql(original_sql: str, description: str) -> dict:
+    """Ask Gemini to broaden a query that returned 0 results."""
+    prompt = SQL_BROADEN_PROMPT.format(
+        original_sql=original_sql,
+        description=description,
+        db_schema=DB_SCHEMA_PROMPT,
+    )
+    messages = [{"role": "user", "content": "Broaden this query to get results."}]
+    return await call_gemini_with_prompt(prompt, messages, max_tokens=1024)
+
+
+async def generate_fallback_hypothesis(user_query: str) -> dict | None:
+    """Generate a single broad fallback hypothesis when results are too thin."""
+    prompt = FALLBACK_HYPOTHESIS_PROMPT.format(
+        user_query=user_query,
+        db_schema=DB_SCHEMA_PROMPT,
+    )
+    messages = [{"role": "user", "content": "Generate a broad fallback query."}]
+    result = await call_gemini_with_prompt(prompt, messages, max_tokens=1024)
+    if result.get("sql_queries"):
+        return result
+    return None
+
+
 # ── Intent Router & Handlers ─────────────────────────────────────────────────
 
 async def route_intent(messages: list[ChatMessage]) -> dict:
@@ -2230,6 +2347,71 @@ def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
     return results
 
 
+def determine_object_type(evaluation: dict, results: list[dict]) -> tuple[str, list[str], str | None, str | None]:
+    """Validate and finalize the object_type from Gemini's evaluation.
+
+    Returns (object_type, available_views, choropleth_metric, heatmap_weight_column).
+    Falls back to 'markers' if the selected type lacks required data.
+    """
+    valid_types = {"markers", "polygon_highlights", "heatmap", "choropleth"}
+    obj_type = evaluation.get("object_type", "markers")
+    if obj_type not in valid_types:
+        obj_type = "markers"
+
+    choropleth_metric = evaluation.get("choropleth_metric")
+    heatmap_weight_column = evaluation.get("heatmap_weight_column")
+
+    # Safety: polygon_highlights requires geometry on results
+    if obj_type == "polygon_highlights":
+        has_geometry = any(isinstance(r.get("geometry"), dict) for r in results)
+        if not has_geometry:
+            obj_type = "markers"
+
+    # Safety: choropleth requires polygon geometry
+    if obj_type == "choropleth":
+        has_poly = any(
+            isinstance(r.get("geometry"), dict)
+            and r["geometry"].get("type") in ("Polygon", "MultiPolygon")
+            for r in results
+        )
+        if not has_poly:
+            obj_type = "markers"
+        if obj_type == "choropleth" and choropleth_metric:
+            # Verify the metric column actually exists in results
+            if not any(choropleth_metric in r for r in results):
+                obj_type = "markers"
+
+    # Safety: heatmap requires a weight column
+    if obj_type == "heatmap" and heatmap_weight_column:
+        if not any(heatmap_weight_column in r for r in results):
+            obj_type = "markers"
+    elif obj_type == "heatmap" and not heatmap_weight_column:
+        heatmap_weight_column = "_score"  # fallback weight
+
+    # Build available_views: primary type + markers fallback
+    available_views = evaluation.get("available_views", [])
+    if not isinstance(available_views, list):
+        available_views = []
+    # Always include markers if lng/lat available
+    if results and results[0].get("lng"):
+        if "markers" not in available_views:
+            available_views.append("markers")
+    # Ensure primary type is first
+    if obj_type != "markers" and obj_type not in available_views:
+        available_views.insert(0, obj_type)
+    elif obj_type in available_views and available_views[0] != obj_type:
+        available_views.remove(obj_type)
+        available_views.insert(0, obj_type)
+
+    # Clear metric/weight if not relevant
+    if obj_type != "choropleth":
+        choropleth_metric = None
+    if obj_type != "heatmap":
+        heatmap_weight_column = None
+
+    return obj_type, available_views, choropleth_metric, heatmap_weight_column
+
+
 @app.post("/api/ai/chat")
 async def ai_chat(req: ChatRequest):
     """AI-powered property analytics chat with intent routing.
@@ -2311,10 +2493,15 @@ async def ai_chat(req: ChatRequest):
 
     # Build the flat results array with geometry for the frontend map
     results = build_flat_results(hypotheses, evaluation)
+    obj_type, available_views, choropleth_metric, heatmap_weight_col = determine_object_type(evaluation, results)
 
     # Return clean response
     return {
-        "type": "explore",
+        "type": "map_realization",
+        "object_type": obj_type,
+        "available_views": available_views,
+        "choropleth_metric": choropleth_metric,
+        "heatmap_weight_column": heatmap_weight_col,
         "title": evaluation.get("title", "Analysis Results"),
         "summary": evaluation.get("summary", "Analysis complete."),
         "results": results,
@@ -2368,7 +2555,7 @@ async def ai_chat_stream(req: ChatRequest):
             }
 
         # Step 1: Route intent
-        yield sse("status", {"phase": "routing", "message": "Classifying query..."})
+        yield sse("status", {"phase": "routing", "message": "Understanding your query..."})
         try:
             routing = await route_intent(req.messages)
         except Exception:
@@ -2414,7 +2601,7 @@ async def ai_chat_stream(req: ChatRequest):
             return
 
         # Explore pipeline
-        yield sse("status", {"phase": "hypotheses", "message": "Forming analysis strategy..."})
+        yield sse("status", {"phase": "hypotheses", "message": "Forming spatial hypotheses..."})
         try:
             hypotheses = await generate_hypotheses(req.messages, req.map_context, conv_ctx)
         except Exception as e:
@@ -2426,10 +2613,12 @@ async def ai_chat_stream(req: ChatRequest):
             "names": [h.get("name", "") for h in hypotheses],
         })
 
-        # Phase 2: Execute SQL
-        yield sse("status", {"phase": "executing", "message": "Querying property database..."})
+        # Phase 2: Execute SQL with agentic retry loop
+        yield sse("status", {"phase": "executing", "message": "Testing hypotheses against the database..."})
         total_queries = 0
         successful_queries = 0
+        MAX_SQL_RETRIES = 2
+
         for h_idx, hypothesis in enumerate(hypotheses):
             for q_idx, query in enumerate(hypothesis.get("sql_queries", [])):
                 sql = query.get("sql", "")
@@ -2437,20 +2626,111 @@ async def ai_chat_stream(req: ChatRequest):
                 if query_plan and not sql.strip():
                     sql = compile_query_plan(query_plan)
                     query["sql"] = sql
-                if sql.strip():
-                    query["result"] = execute_hypothesis_sql(sql)
+                if not sql.strip():
+                    continue
+
+                # Agentic retry loop
+                result = None
+                for attempt in range(MAX_SQL_RETRIES + 1):
+                    result = execute_hypothesis_sql(sql)
                     total_queries += 1
-                    if not query["result"].get("error"):
-                        successful_queries += 1
-                        yield sse("query_complete", {
-                            "hypothesis_index": h_idx,
-                            "query_index": q_idx,
-                            "row_count": query["result"]["row_count"],
+
+                    # Case 1: SQL error — ask Gemini to fix it
+                    if result.get("error") and attempt < MAX_SQL_RETRIES:
+                        yield sse("tool_action", {
+                            "action": "sql_retry",
+                            "attempt": attempt + 1,
+                            "error": result["error"][:200],
+                            "hypothesis": hypothesis.get("name", ""),
+                        })
+                        try:
+                            fix = await retry_failed_sql(sql, result["error"])
+                            new_sql = fix.get("corrected_sql", "")
+                            if new_sql.strip():
+                                sql = new_sql
+                                continue  # retry with corrected SQL
+                        except Exception:
+                            pass
+                        break  # couldn't get a fix from Gemini
+
+                    # Case 2: Empty results — ask Gemini to broaden
+                    elif result["row_count"] == 0 and not result.get("error") and attempt == 0:
+                        yield sse("tool_action", {
+                            "action": "sql_broaden",
+                            "hypothesis": hypothesis.get("name", ""),
                             "description": query.get("description", ""),
                         })
+                        try:
+                            broader = await broaden_empty_sql(sql, query.get("description", ""))
+                            new_sql = broader.get("corrected_sql", "")
+                            if new_sql.strip():
+                                sql = new_sql
+                                continue  # retry with broadened SQL
+                        except Exception:
+                            pass
+                        break  # couldn't broaden
+
+                    # Case 3: Success or exhausted retries
+                    else:
+                        break
+
+                query["result"] = result
+                if result and not result.get("error"):
+                    successful_queries += 1
+                    yield sse("query_complete", {
+                        "hypothesis_index": h_idx,
+                        "query_index": q_idx,
+                        "hypothesis_total": len(hypotheses),
+                        "row_count": result["row_count"],
+                        "description": query.get("description", ""),
+                    })
+
+        # Quality check: if too few results, try a fallback hypothesis
+        total_rows = sum(
+            q.get("result", {}).get("row_count", 0)
+            for h in hypotheses for q in h.get("sql_queries", [])
+            if not q.get("result", {}).get("error")
+        )
+
+        if total_rows == 0:
+            yield sse("tool_action", {
+                "action": "quality_check",
+                "message": "No results found. Trying a broader approach...",
+            })
+            try:
+                fallback = await generate_fallback_hypothesis(user_query)
+                if fallback:
+                    for q in fallback.get("sql_queries", []):
+                        fb_sql = q.get("sql", "")
+                        if fb_sql.strip():
+                            q["result"] = execute_hypothesis_sql(fb_sql)
+                            total_queries += 1
+                            if not q["result"].get("error"):
+                                successful_queries += 1
+                    hypotheses.append(fallback)
+            except Exception:
+                pass
+        elif total_rows < 3:
+            yield sse("tool_action", {
+                "action": "quality_check",
+                "message": f"Only {total_rows} result{'s' if total_rows != 1 else ''} found. Trying a broader approach...",
+            })
+            try:
+                fallback = await generate_fallback_hypothesis(user_query)
+                if fallback:
+                    for q in fallback.get("sql_queries", []):
+                        fb_sql = q.get("sql", "")
+                        if fb_sql.strip():
+                            q["result"] = execute_hypothesis_sql(fb_sql)
+                            total_queries += 1
+                            if not q["result"].get("error"):
+                                successful_queries += 1
+                    hypotheses.append(fallback)
+            except Exception:
+                pass
 
         # Phase 3: Rank
-        yield sse("status", {"phase": "ranking", "message": "Ranking opportunities..."})
+        yield sse("status", {"phase": "ranking", "message": "Ranking and visualizing results..."})
         try:
             evaluation = await evaluate_hypotheses(user_query, hypotheses)
         except Exception as e:
@@ -2458,9 +2738,14 @@ async def ai_chat_stream(req: ChatRequest):
             yield sse("done", {})
             return
         results = build_flat_results(hypotheses, evaluation)
+        obj_type, available_views, choropleth_metric, heatmap_weight_col = determine_object_type(evaluation, results)
 
         yield sse("result", {
-            "type": "explore",
+            "type": "map_realization",
+            "object_type": obj_type,
+            "available_views": available_views,
+            "choropleth_metric": choropleth_metric,
+            "heatmap_weight_column": heatmap_weight_col,
             "title": evaluation.get("title", "Analysis Results"),
             "summary": evaluation.get("summary", "Analysis complete."),
             "results": results,

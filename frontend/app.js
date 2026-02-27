@@ -10,6 +10,7 @@ let circleDrawing = false;  // true while dragging to define radius
 // ── Panel state ──────────────────────────────────────────────────────────────
 let mapCollapsed = false;
 let savedMapWidth = 75; // percentage
+let currentMode = "agent"; // "agent" | "map"
 
 // ── Map initialisation ───────────────────────────────────────────────────────
 const map = new maplibregl.Map({
@@ -465,6 +466,105 @@ map.on("load", () => {
       "line-color": "#9b59b6",
       "line-width": 2,
       "line-dasharray": [4, 3],
+    },
+  });
+
+  // ── AI Realization sources (dedicated, cleared between queries) ──────────────
+
+  // Polygon highlights — colored parcel/zone boundaries
+  map.addSource("ai-polygon-highlights", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+  map.addLayer({
+    id: "ai-polygon-fill",
+    type: "fill",
+    source: "ai-polygon-highlights",
+    paint: {
+      "fill-color": [
+        "interpolate", ["linear"], ["coalesce", ["get", "_score"], 0],
+        0, "rgba(59,130,246,0.15)",
+        50, "rgba(234,179,8,0.25)",
+        100, "rgba(239,68,68,0.4)",
+      ],
+      "fill-outline-color": "rgba(0,0,0,0)",
+    },
+  });
+  map.addLayer({
+    id: "ai-polygon-outline",
+    type: "line",
+    source: "ai-polygon-highlights",
+    paint: {
+      "line-color": [
+        "interpolate", ["linear"], ["coalesce", ["get", "_score"], 0],
+        0, "#3b82f6",
+        50, "#eab308",
+        100, "#ef4444",
+      ],
+      "line-width": 2,
+    },
+  });
+  map.addLayer({
+    id: "ai-polygon-selected",
+    type: "fill",
+    source: "ai-polygon-highlights",
+    filter: ["==", ["get", "_rank"], -1],
+    paint: {
+      "fill-color": "rgba(255,255,255,0.25)",
+      "fill-outline-color": "#fff",
+    },
+  });
+
+  // Heatmap — density/weight overlay
+  map.addSource("ai-heatmap", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+  map.addLayer({
+    id: "ai-heatmap-layer",
+    type: "heatmap",
+    source: "ai-heatmap",
+    paint: {
+      "heatmap-weight": ["coalesce", ["get", "_heatmap_weight_normalized"], 0.5],
+      "heatmap-radius": [
+        "interpolate", ["linear"], ["zoom"],
+        10, 8,
+        16, 20,
+      ],
+      "heatmap-color": [
+        "interpolate", ["linear"], ["heatmap-density"],
+        0, "rgba(0,0,255,0)",
+        0.2, "#3b82f6",
+        0.5, "#22c55e",
+        0.8, "#eab308",
+        1, "#ef4444",
+      ],
+      "heatmap-intensity": 1.5,
+      "heatmap-opacity": 0.85,
+    },
+  });
+
+  // Choropleth — area polygons colored by metric
+  map.addSource("ai-choropleth", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+  map.addLayer({
+    id: "ai-choropleth-fill",
+    type: "fill",
+    source: "ai-choropleth",
+    paint: {
+      "fill-color": "#3b82f6",
+      "fill-opacity": 0.5,
+    },
+  });
+  map.addLayer({
+    id: "ai-choropleth-outline",
+    type: "line",
+    source: "ai-choropleth",
+    paint: {
+      "line-color": "#3b82f6",
+      "line-width": 0.75,
     },
   });
 
@@ -1525,6 +1625,56 @@ function toggleMapPanel() {
 mapCollapseBtn.addEventListener("click", toggleMapPanel);
 mapExpandBtn.addEventListener("click", toggleMapPanel);
 
+// ── Mode tabs (Agent / Map) ───────────────────────────────────────────────────
+function switchMode(mode) {
+  if (mode === currentMode) return;
+  currentMode = mode;
+
+  const appEl = document.getElementById("app");
+  const tabAgent = document.getElementById("tab-agent");
+  const tabMap = document.getElementById("tab-map");
+  const chatPanel = document.getElementById("chat-panel");
+  const layerPanel = document.getElementById("layer-panel");
+
+  tabAgent.classList.toggle("active", mode === "agent");
+  tabMap.classList.toggle("active", mode === "map");
+  chatPanel.dataset.mode = mode;
+
+  if (mode === "agent") {
+    // Full-screen chat mode: hide map panel via CSS class
+    appEl.classList.add("agent-mode");
+    appEl.classList.remove("map-mode");
+    if (layerPanel) {
+      layerPanel.style.pointerEvents = "none";
+      layerPanel.style.opacity = "0";
+    }
+  } else {
+    // Map mode: show map panel, collapse chat
+    appEl.classList.remove("agent-mode");
+    appEl.classList.add("map-mode");
+    // Ensure map panel is visible and expanded
+    mapPanel.style.display = "";
+    resizeDivider.style.display = "";
+    if (mapCollapsed) {
+      mapCollapsed = false;
+      mapPanel.classList.remove("collapsed");
+      mapPanel.style.width = savedMapWidth + "%";
+      resizeDivider.classList.remove("hidden");
+      mapCollapseBtn.style.display = "flex";
+      mapExpandBtn.style.display = "none";
+    }
+    if (layerPanel) {
+      layerPanel.style.pointerEvents = "";
+      layerPanel.style.opacity = "1";
+    }
+    setTimeout(() => map.resize(), 350);
+    loadParcels();
+  }
+}
+
+document.getElementById("tab-agent").addEventListener("click", () => switchMode("agent"));
+document.getElementById("tab-map").addEventListener("click", () => switchMode("map"));
+
 // Keyboard shortcut: Cmd/Ctrl+\ to toggle map
 document.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
@@ -1832,6 +1982,288 @@ let aiActiveResultIdx = -1;
 let aiHasStarted = false; // track if user has made first query
 let conversationContext = null; // tracks last response context for follow-ups
 
+// ── Agent map state (tracks current AI-driven visualization) ──────────────────
+let agentMapState = {
+  realizationId: null,
+  objectType: null,         // "markers" | "polygon_highlights" | "heatmap" | "choropleth"
+  availableViews: [],
+  results: [],
+  activeIdx: -1,
+  choroplethMetric: null,
+  heatmapWeightColumn: null,
+};
+
+// ── Embedded map instances (one per chat realization) ──────────────────────────
+let embeddedMaps = []; // {mapInstance, containerId, results, objectType, markers[]}
+
+function cleanupEmbeddedMaps() {
+  embeddedMaps.forEach((em) => {
+    if (em.markers) em.markers.forEach((m) => m.remove());
+    if (em.mapInstance) em.mapInstance.remove();
+  });
+  embeddedMaps = [];
+}
+
+function computeBounds(results) {
+  let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity;
+  results.forEach((r) => {
+    if (r.lng && r.lat) {
+      minLng = Math.min(minLng, r.lng);
+      maxLng = Math.max(maxLng, r.lng);
+      minLat = Math.min(minLat, r.lat);
+      maxLat = Math.max(maxLat, r.lat);
+    }
+  });
+  if (!isFinite(minLng)) return null;
+  return [[minLng, minLat], [maxLng, maxLat]];
+}
+
+function addRealizationToEmbeddedMap(emMap, results, objectType, data) {
+  const m = emMap.mapInstance;
+
+  // Clean previous markers if any
+  if (emMap.markers) emMap.markers.forEach((mk) => mk.remove());
+  emMap.markers = [];
+
+  // Remove old sources/layers if switching view type
+  ["ai-polygon-fill", "ai-polygon-outline", "ai-heatmap-layer", "ai-choropleth-fill", "ai-choropleth-outline"].forEach((id) => {
+    if (m.getLayer(id)) m.removeLayer(id);
+  });
+  ["ai-polygon-highlights", "ai-heatmap", "ai-choropleth"].forEach((id) => {
+    if (m.getSource(id)) m.removeSource(id);
+  });
+
+  if (objectType === "polygon_highlights") {
+    const features = results.filter((r) => r.geometry && typeof r.geometry === "object").map((r) => ({
+      type: "Feature",
+      properties: { _score: r._score || 0, _rank: r._rank || 0 },
+      geometry: r.geometry,
+    }));
+    m.addSource("ai-polygon-highlights", { type: "geojson", data: { type: "FeatureCollection", features } });
+    m.addLayer({
+      id: "ai-polygon-fill", type: "fill", source: "ai-polygon-highlights",
+      paint: {
+        "fill-color": ["interpolate", ["linear"], ["coalesce", ["get", "_score"], 0], 0, "rgba(59,130,246,0.2)", 50, "rgba(234,179,8,0.3)", 100, "rgba(239,68,68,0.45)"],
+        "fill-outline-color": "rgba(0,0,0,0)",
+      },
+    });
+    m.addLayer({
+      id: "ai-polygon-outline", type: "line", source: "ai-polygon-highlights",
+      paint: { "line-color": ["interpolate", ["linear"], ["coalesce", ["get", "_score"], 0], 0, "#3b82f6", 50, "#eab308", 100, "#ef4444"], "line-width": 2 },
+    });
+    // Add numbered markers at centroids
+    results.forEach((r, idx) => {
+      if (!r.lng || !r.lat) return;
+      const el = document.createElement("div");
+      el.className = "ai-marker-poly";
+      el.textContent = idx + 1;
+      const mk = new maplibregl.Marker({ element: el }).setLngLat([r.lng, r.lat]).addTo(m);
+      emMap.markers.push(mk);
+    });
+  } else if (objectType === "heatmap") {
+    const weightCol = data.heatmap_weight_column || "_score";
+    const weights = results.map((r) => Number(r[weightCol]) || 0).filter((v) => v > 0);
+    const maxW = weights.length ? Math.max(...weights) : 1;
+    const minW = weights.length ? Math.min(...weights) : 0;
+    const range = maxW - minW || 1;
+    const features = results.filter((r) => r.lng && r.lat).map((r) => ({
+      type: "Feature",
+      properties: { _heatmap_weight_normalized: ((Number(r[weightCol]) || minW) - minW) / range },
+      geometry: { type: "Point", coordinates: [r.lng, r.lat] },
+    }));
+    m.addSource("ai-heatmap", { type: "geojson", data: { type: "FeatureCollection", features } });
+    m.addLayer({
+      id: "ai-heatmap-layer", type: "heatmap", source: "ai-heatmap",
+      paint: {
+        "heatmap-weight": ["coalesce", ["get", "_heatmap_weight_normalized"], 0.5],
+        "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 10, 8, 16, 20],
+        "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"], 0, "rgba(0,0,255,0)", 0.2, "#3b82f6", 0.5, "#22c55e", 0.8, "#eab308", 1, "#ef4444"],
+        "heatmap-intensity": 1.5, "heatmap-opacity": 0.85,
+      },
+    });
+  } else if (objectType === "choropleth") {
+    const metric = data.choropleth_metric;
+    const features = results.filter((r) => r.geometry && ["Polygon", "MultiPolygon"].includes(r.geometry?.type)).map((r) => ({
+      type: "Feature",
+      properties: { ...r, geometry: undefined },
+      geometry: r.geometry,
+    }));
+    m.addSource("ai-choropleth", { type: "geojson", data: { type: "FeatureCollection", features } });
+    const colorExpr = metric ? buildChoroplethExpression(results, metric) : "#3b82f6";
+    m.addLayer({
+      id: "ai-choropleth-fill", type: "fill", source: "ai-choropleth",
+      paint: { "fill-color": colorExpr, "fill-opacity": 0.55 },
+    });
+    m.addLayer({
+      id: "ai-choropleth-outline", type: "line", source: "ai-choropleth",
+      paint: { "line-color": "#3b82f6", "line-width": 0.75 },
+    });
+  } else {
+    // markers (default)
+    results.forEach((r, idx) => {
+      if (!r.lng || !r.lat) return;
+      const el = document.createElement("div");
+      el.className = idx === 0 ? "ai-marker ai-marker-top" : "ai-marker";
+      el.dataset.idx = idx;
+      el.textContent = idx + 1;
+      const mk = new maplibregl.Marker({ element: el }).setLngLat([r.lng, r.lat]).addTo(m);
+      emMap.markers.push(mk);
+    });
+  }
+
+  // Fit bounds
+  const bounds = computeBounds(results);
+  if (bounds) {
+    m.fitBounds(bounds, { padding: 50, maxZoom: objectType === "heatmap" ? 14 : 16, duration: 800 });
+  }
+
+  emMap.objectType = objectType;
+}
+
+function renderEmbeddedMapMessage(data, isHistorical) {
+  const results = data.results || [];
+  const availableViews = data.available_views || ["markers"];
+  const currentView = data.object_type || "markers";
+  const containerId = `embedded-map-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+  const viewIcons = {
+    markers: { icon: "\u{1F4CD}", label: "Sites" },
+    polygon_highlights: { icon: "\u2B21", label: "Polygons" },
+    heatmap: { icon: "\u{1F525}", label: "Heatmap" },
+    choropleth: { icon: "\u{1F4CA}", label: "Areas" },
+  };
+
+  // Build result card rows
+  const resultRowsHtml = results.slice(0, 15).map((r, idx) => {
+    const score = r._score || 0;
+    const scoreClass = score >= 80 ? "high" : score >= 60 ? "mid" : "low";
+    const title = r.address || r.nationalcadastralreference || r.plan_ref || r.zone_desc || r.sa_urban_area_name || `Site ${idx + 1}`;
+    const meta = r.opportunity_reason || r._table || "";
+    return `<div class="embedded-result-row" data-idx="${idx}">
+      <div class="embedded-result-rank">${idx + 1}</div>
+      <div class="embedded-result-info">
+        <div class="embedded-result-title">${title}</div>
+        <div class="embedded-result-meta">${meta}</div>
+      </div>
+      <div class="embedded-result-score ${scoreClass}">${score}</div>
+    </div>`;
+  }).join("");
+
+  // View switcher buttons
+  const switcherHtml = availableViews.map((v) => {
+    const vi = viewIcons[v] || { icon: "\u25FB", label: v };
+    return `<button class="view-btn${v === currentView ? " active" : ""}" data-view="${v}" title="${vi.label}">${vi.icon}</button>`;
+  }).join("");
+
+  // Build the message
+  const msgDiv = document.createElement("div");
+  msgDiv.className = "ai-msg ai-msg-assistant";
+
+  msgDiv.innerHTML = `
+    <div class="ai-msg-content" style="max-width:100%;padding:0;">
+      <div style="padding:10px 14px 6px;">
+        <div class="ai-msg-title">${data.title || "Analysis Results"}</div>
+        <div class="ai-msg-body">${data.summary || ""}</div>
+      </div>
+      <div class="embedded-map-wrap">
+        <div class="embedded-map-container" id="${containerId}"></div>
+        <div class="embedded-map-toolbar">
+          <div class="embedded-map-info"><strong>${results.length}</strong> site${results.length !== 1 ? "s" : ""} &middot; ${viewIcons[currentView]?.label || currentView} view</div>
+          ${switcherHtml}
+          <button class="expand-btn" title="Expand map">Expand</button>
+        </div>
+        ${results.length > 0 ? `<div class="embedded-result-cards">${resultRowsHtml}</div>` : ""}
+      </div>
+    </div>
+  `;
+
+  aiMessages.appendChild(msgDiv);
+  aiMessages.scrollTop = aiMessages.scrollHeight;
+
+  // Store realization data on the DOM element for view switching
+  const wrap = msgDiv.querySelector(".embedded-map-wrap");
+  wrap.dataset.realizationData = JSON.stringify({
+    results, object_type: currentView, available_views: availableViews,
+    choropleth_metric: data.choropleth_metric || null,
+    heatmap_weight_column: data.heatmap_weight_column || null,
+  });
+
+  // Initialize MapLibre instance after DOM insertion
+  requestAnimationFrame(() => {
+    const center = results.length > 0 && results[0].lng
+      ? [results[0].lng, results[0].lat]
+      : [-6.2603, 53.3498];
+
+    const embeddedMap = new maplibregl.Map({
+      container: containerId,
+      style: {
+        version: 8,
+        sources: {
+          osm: {
+            type: "raster",
+            tiles: [currentBasemap === "satellite"
+              ? "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+              : "https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            tileSize: 256,
+            maxzoom: 19,
+          },
+        },
+        layers: [{ id: "osm-tiles", type: "raster", source: "osm" }],
+      },
+      center,
+      zoom: 13,
+      interactive: true,
+    });
+
+    const emEntry = { mapInstance: embeddedMap, containerId, results, objectType: currentView, markers: [] };
+    embeddedMaps.push(emEntry);
+
+    embeddedMap.on("load", () => {
+      addRealizationToEmbeddedMap(emEntry, results, currentView, data);
+    });
+
+    // Wire view-switcher
+    wrap.querySelectorAll(".view-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const newView = btn.dataset.view;
+        wrap.querySelectorAll(".view-btn").forEach((b) => b.classList.toggle("active", b === btn));
+        wrap.querySelector(".embedded-map-info").innerHTML = `<strong>${results.length}</strong> site${results.length !== 1 ? "s" : ""} &middot; ${viewIcons[newView]?.label || newView} view`;
+        const stored = JSON.parse(wrap.dataset.realizationData);
+        addRealizationToEmbeddedMap(emEntry, results, newView, stored);
+      });
+    });
+
+    // Wire expand button
+    const expandBtn = wrap.querySelector(".expand-btn");
+    const mapContainer = wrap.querySelector(".embedded-map-container");
+    if (expandBtn && mapContainer) {
+      expandBtn.addEventListener("click", () => {
+        const isExpanded = mapContainer.classList.toggle("expanded");
+        expandBtn.textContent = isExpanded ? "Collapse" : "Expand";
+        setTimeout(() => embeddedMap.resize(), 350);
+      });
+    }
+
+    // Wire result row clicks
+    wrap.querySelectorAll(".embedded-result-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        const idx = parseInt(row.dataset.idx);
+        const r = results[idx];
+        if (!r || !r.lng || !r.lat) return;
+        wrap.querySelectorAll(".embedded-result-row").forEach((rr) => rr.classList.toggle("active", rr === row));
+        embeddedMap.flyTo({ center: [r.lng, r.lat], zoom: 16, duration: 800 });
+        // Highlight marker
+        emEntry.markers.forEach((mk, mkIdx) => {
+          const el = mk.getElement();
+          if (el) el.classList.toggle("active", mkIdx === idx);
+        });
+      });
+    });
+  });
+
+  return msgDiv;
+}
+
 // ── Chat Session Management ─────────────────────────────────────────────────
 const CHATS_STORAGE_KEY = "landos_chats";
 let chatSessions = [];    // array of {id, title, created_at, updated_at, messages, results}
@@ -1942,9 +2374,19 @@ function syncCurrentChatState() {
   chat.messages = [...aiConversation];
   chat.updated_at = new Date().toISOString();
   autoTitleChat(chat);
-  // Store last results for restoring map markers
+  // Store last results for restoring map markers (legacy fallback)
   if (showAiResults._currentResults) {
     chat.lastResults = showAiResults._currentResults;
+  }
+  // Store realization state for full restore
+  if (agentMapState.results && agentMapState.results.length > 0) {
+    chat.lastRealization = {
+      object_type: agentMapState.objectType,
+      available_views: agentMapState.availableViews,
+      results: agentMapState.results,
+      choropleth_metric: agentMapState.choroplethMetric,
+      heatmap_weight_column: agentMapState.heatmapWeightColumn,
+    };
   }
 }
 
@@ -1958,7 +2400,8 @@ function resetChatUI() {
   aiSuggestionsEl.innerHTML = "";
   aiResultsContainer.style.display = "none";
   aiResultsList.innerHTML = "";
-  clearAiMarkers();
+  clearAgentMapState();
+  cleanupEmbeddedMaps();
   showAiResults._currentResults = null;
   aiActiveResultIdx = -1;
   closeFlyout();
@@ -1988,7 +2431,11 @@ function replayChatMessages(chat) {
       // Try to parse structured response and replay appropriately
       try {
         const data = JSON.parse(msg.content);
-        if (data.type === "explore" && data.title) {
+        if (data.type === "map_realization" && data.results && data.results.length > 0) {
+          renderEmbeddedMapMessage(data, true);
+        } else if (data.type === "map_realization" && data.title) {
+          addAiMessage("assistant", `${data.title}\n${data.summary || ""}`);
+        } else if (data.type === "explore" && data.title) {
           addAiMessage("assistant", `${data.title}\n${data.summary || ""}`);
         } else if (data.type === "stat_answer") {
           addAiMessage("assistant", data.message || "");
@@ -2007,8 +2454,9 @@ function replayChatMessages(chat) {
     }
   });
 
-  // Restore last results on map if available
-  if (chat.lastResults && chat.lastResults.length > 0) {
+  // In agent mode, embedded maps are recreated inline by replayChatMessages above.
+  // In map mode or for legacy explore results, restore to main map.
+  if (currentMode === "map" && chat.lastResults && chat.lastResults.length > 0) {
     showAiResults(chat.lastResults);
   }
 
@@ -2098,7 +2546,10 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-// Initialize: load chats and restore active session
+// Initialize: set Agent Mode as default, load chats and restore active session
+document.getElementById("app").classList.add("agent-mode");
+currentMode = "agent";
+
 loadChatsFromStorage();
 if (chatSessions.length === 0) {
   createNewChat(true);
@@ -2244,22 +2695,16 @@ async function sendAiMessage(text) {
   saveChatsToStorage();
   renderChatList();
 
-  // Show loading with staged progress messages
-  const loadingEl = addAiMessage("loading", "Thinking");
+  // Show thinking trace loading element
+  const loadingEl = addThinkingTrace();
   aiSendBtn.classList.add("loading");
 
-  // Fallback staged loading timers (used if SSE status events are slow)
-  const loadingStages = [
-    { text: "Forming analysis strategy", delay: 3000 },
-    { text: "Querying property database", delay: 8000 },
-    { text: "Ranking opportunities", delay: 14000 },
+  // Fallback staged timers to advance thinking trace if SSE is slow
+  const stageTimers = [
+    setTimeout(() => updateThinkingPhase(loadingEl, 1, "active", "Forming spatial hypotheses..."), 3000),
+    setTimeout(() => updateThinkingPhase(loadingEl, 2, "active", "Testing hypotheses against the database..."), 8000),
+    setTimeout(() => updateThinkingPhase(loadingEl, 3, "active", "Ranking and visualizing results..."), 14000),
   ];
-  const stageTimers = loadingStages.map(stage =>
-    setTimeout(() => {
-      const content = loadingEl.querySelector(".ai-msg-content");
-      if (content) content.innerHTML = `<span class="ai-loading-icon">&#9889;</span>${stage.text}<span class="ai-loading-dots"></span>`;
-    }, stage.delay)
-  );
 
   try {
     const resp = await fetch(`${API}/ai/chat/stream`, {
@@ -2316,35 +2761,140 @@ async function sendAiMessage(text) {
   }
 }
 
+function addThinkingTrace() {
+  const div = document.createElement("div");
+  div.className = "ai-msg ai-msg-loading";
+  div.innerHTML = `
+    <div class="realization-thinking">
+      <div class="thinking-phase active" data-phase="0">
+        <span class="thinking-icon thinking-spin">◌</span>
+        <span class="thinking-text">Understanding your query...</span>
+      </div>
+      <div class="thinking-phase pending" data-phase="1">
+        <span class="thinking-icon">·</span>
+        <span class="thinking-text">Forming spatial hypotheses</span>
+      </div>
+      <div class="thinking-phase pending" data-phase="2">
+        <span class="thinking-icon">·</span>
+        <span class="thinking-text">Testing hypotheses against the database</span>
+      </div>
+      <div class="thinking-phase pending" data-phase="3">
+        <span class="thinking-icon">·</span>
+        <span class="thinking-text">Ranking and visualizing results</span>
+      </div>
+    </div>
+  `;
+  aiMessages.appendChild(div);
+  aiMessages.scrollTop = aiMessages.scrollHeight;
+  return div;
+}
+
+function updateThinkingPhase(loadingEl, phaseIdx, status, text) {
+  if (!loadingEl || !loadingEl.parentNode) return;
+  // Mark previous active phases as done
+  loadingEl.querySelectorAll(".thinking-phase").forEach((ph) => {
+    const idx = parseInt(ph.dataset.phase);
+    if (idx < phaseIdx && ph.classList.contains("active")) {
+      ph.classList.remove("active");
+      ph.classList.add("done");
+      ph.querySelector(".thinking-icon").textContent = "✓";
+      ph.querySelector(".thinking-icon").classList.remove("thinking-spin");
+    }
+    if (idx === phaseIdx) {
+      ph.classList.remove("pending", "done", "error");
+      ph.classList.add(status);
+      if (text) ph.querySelector(".thinking-text").textContent = text;
+      const icon = ph.querySelector(".thinking-icon");
+      if (status === "active") {
+        icon.textContent = "◌";
+        icon.classList.add("thinking-spin");
+      } else if (status === "done") {
+        icon.textContent = "✓";
+        icon.classList.remove("thinking-spin");
+      } else if (status === "error") {
+        icon.textContent = "✗";
+        icon.classList.remove("thinking-spin");
+      }
+    }
+  });
+  aiMessages.scrollTop = aiMessages.scrollHeight;
+}
+
 function handleSSEEvent(eventType, data, loadingEl, stageTimers) {
   switch (eventType) {
     case "status": {
-      // Update loading message with real phase info
       stageTimers.forEach(clearTimeout);
-      const content = loadingEl.querySelector(".ai-msg-content");
-      if (content) {
-        content.innerHTML = `<span class="ai-loading-icon">&#9889;</span>${data.message || "Processing..."}<span class="ai-loading-dots"></span>`;
-      }
+      const phaseMap = {
+        routing: [0, "active", "Understanding your query..."],
+        hypotheses: [1, "active", "Forming spatial hypotheses..."],
+        executing: [2, "active", "Testing hypotheses against the database..."],
+        ranking: [3, "active", "Ranking and visualizing results..."],
+        responding: [1, "active", "Thinking..."],
+        querying: [2, "active", "Querying the database..."],
+      };
+      const [phaseIdx, st, txt] = phaseMap[data.phase] || [0, "active", data.message];
+      updateThinkingPhase(loadingEl, phaseIdx, st, txt);
       break;
     }
-    case "intent":
-      console.log("Intent:", data.intent, data.reasoning);
+    case "intent": {
+      stageTimers.forEach(clearTimeout);
+      const intentLabel = data.intent ? data.intent.replace(/_/g, " ") : "site search";
+      updateThinkingPhase(loadingEl, 0, "done", `Classified as: ${intentLabel}`);
+      updateThinkingPhase(loadingEl, 1, "active", "Forming spatial hypotheses...");
       break;
+    }
     case "hypotheses": {
       stageTimers.forEach(clearTimeout);
-      const content = loadingEl.querySelector(".ai-msg-content");
-      if (content) {
-        content.innerHTML = `<span class="ai-loading-icon">&#9889;</span>Testing ${data.count} hypotheses...<span class="ai-loading-dots"></span>`;
+      let text = `Formed ${data.count} hypothesis${data.count !== 1 ? "es" : ""}`;
+      updateThinkingPhase(loadingEl, 1, "done", text);
+      // Show hypothesis names as sub-list
+      const phase1 = loadingEl.querySelector("[data-phase='1']");
+      if (phase1 && data.names && data.names.length > 0) {
+        const list = document.createElement("div");
+        list.className = "thinking-hypothesis-list";
+        data.names.forEach((name) => {
+          const item = document.createElement("div");
+          item.className = "thinking-hypothesis-item";
+          item.textContent = `· ${name}`;
+          list.appendChild(item);
+        });
+        phase1.appendChild(list);
       }
+      updateThinkingPhase(loadingEl, 2, "active", "Testing hypotheses against the database...");
       break;
     }
-    case "query_complete":
-      // Could show incremental progress
+    case "tool_action": {
+      // Show agentic actions (retry, broaden, quality check) as sub-lines in the thinking trace
+      const phase2El = loadingEl.querySelector("[data-phase='2']");
+      if (phase2El) {
+        const actionLine = document.createElement("div");
+        actionLine.className = "thinking-tool-action";
+        if (data.action === "sql_retry") {
+          actionLine.innerHTML = `<span class="tool-icon">\u21bb</span> Retrying query \u2014 ${(data.error || "").substring(0, 80)}`;
+        } else if (data.action === "sql_broaden") {
+          actionLine.innerHTML = `<span class="tool-icon">\u2194</span> Broadening search for "${data.description || data.hypothesis || ""}"`;
+        } else if (data.action === "quality_check") {
+          actionLine.innerHTML = `<span class="tool-icon">\u26a1</span> ${data.message || "Checking result quality..."}`;
+        } else {
+          actionLine.innerHTML = `<span class="tool-icon">\u2022</span> ${data.message || data.action}`;
+        }
+        phase2El.appendChild(actionLine);
+      }
+      aiMessages.scrollTop = aiMessages.scrollHeight;
       break;
+    }
+    case "query_complete": {
+      const total = data.hypothesis_total || 1;
+      const hIdx = (data.hypothesis_index || 0) + 1;
+      updateThinkingPhase(loadingEl, 2, "active",
+        `Testing hypothesis ${hIdx}/${total}: ${data.description || ""}...`);
+      break;
+    }
     case "result": {
-      // Remove loading
+      // Mark final phase done then remove loading
       stageTimers.forEach(clearTimeout);
-      if (loadingEl.parentNode) loadingEl.remove();
+      updateThinkingPhase(loadingEl, 3, "done", "Done");
+      setTimeout(() => { if (loadingEl.parentNode) loadingEl.remove(); }, 300);
       aiSendBtn.classList.remove("loading");
 
       // Store response in conversation
@@ -2376,7 +2926,100 @@ function handleSSEEvent(eventType, data, loadingEl, stageTimers) {
   }
 }
 
+function renderRealizationCard(data, isHistorical) {
+  const results = data.results || [];
+  const availableViews = data.available_views || ["markers"];
+  const currentView = data.object_type || "markers";
+
+  const viewIcons = {
+    markers: { icon: "📍", label: "Sites" },
+    polygon_highlights: { icon: "⬡", label: "Polygons" },
+    heatmap: { icon: "🔥", label: "Heatmap" },
+    choropleth: { icon: "📊", label: "Areas" },
+  };
+
+  const card = document.createElement("div");
+  card.className = "ai-msg ai-msg-assistant";
+
+  const inner = document.createElement("div");
+  inner.className = "realization-card";
+  if (isHistorical) inner.dataset.historical = "true";
+  inner.dataset.realizationData = JSON.stringify({
+    results: results.map((r) => ({ ...r, geometry: r.geometry || undefined })),
+    object_type: currentView,
+    available_views: availableViews,
+    choropleth_metric: data.choropleth_metric || null,
+    heatmap_weight_column: data.heatmap_weight_column || null,
+  });
+
+  // View switcher buttons
+  const switcherHtml = availableViews.map((v) => {
+    const vi = viewIcons[v] || { icon: "◻", label: v };
+    return `<button class="view-btn${v === currentView ? " active" : ""}" data-view="${v}" title="${vi.label}">${vi.icon}</button>`;
+  }).join("");
+
+  inner.innerHTML = `
+    <div class="realization-header">
+      <span class="realization-title">${data.title || "Analysis Results"}</span>
+      <div class="realization-view-switcher">${switcherHtml}</div>
+    </div>
+    <div class="realization-summary">${data.summary || ""}</div>
+    <div class="realization-meta">
+      <span class="realization-type-badge">${viewIcons[currentView]?.label || currentView}</span>
+      <span class="realization-count">${results.length} site${results.length !== 1 ? "s" : ""}</span>
+      ${results.length > 0 ? `<button class="realization-list-toggle">Show list</button>` : ""}
+    </div>
+  `;
+
+  card.appendChild(inner);
+  aiMessages.appendChild(card);
+  aiMessages.scrollTop = aiMessages.scrollHeight;
+
+  // Wire view-switcher clicks
+  inner.querySelectorAll(".view-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const newView = btn.dataset.view;
+      // Update active button state
+      inner.querySelectorAll(".view-btn").forEach((b) => b.classList.toggle("active", b === btn));
+      inner.querySelector(".realization-type-badge").textContent = viewIcons[newView]?.label || newView;
+      // Re-render map with new view type using stored data
+      const stored = JSON.parse(inner.dataset.realizationData);
+      clearAgentMapState();
+      renderRealization({ ...stored, object_type: newView });
+    });
+  });
+
+  // Wire "Show list" toggle
+  const listToggle = inner.querySelector(".realization-list-toggle");
+  if (listToggle) {
+    listToggle.addEventListener("click", () => {
+      if (aiResultsContainer.style.display === "none" || !aiResultsContainer.style.display) {
+        showAiResults(results);
+        listToggle.textContent = "Hide list";
+      } else {
+        aiResultsContainer.style.display = "none";
+        listToggle.textContent = "Show list";
+      }
+    });
+  }
+
+  return card;
+}
+
 function renderAiResponse(data) {
+  if (data.type === "map_realization") {
+    if (data.results && data.results.length > 0) {
+      renderEmbeddedMapMessage(data, false);
+    } else {
+      addAiMessage("assistant", data.title ? `${data.title}\n${data.summary || ""}` : "No matching sites found. Try a different area or broader criteria.");
+    }
+
+    if (data.follow_ups && data.follow_ups.length > 0) {
+      showAiFollowUps(data.follow_ups);
+    }
+    return;
+  }
+
   if (data.type === "explore") {
     const summaryText = data.title
       ? `${data.title}\n${data.summary || ""}`
@@ -2745,6 +3388,185 @@ function selectAiResult(idx, results) {
 function clearAiMarkers() {
   aiMarkers.forEach((m) => m.marker.remove());
   aiMarkers = [];
+}
+
+// ── Agent map state management ────────────────────────────────────────────────
+
+function clearAgentMapState() {
+  clearAiMarkers();
+  const empty = { type: "FeatureCollection", features: [] };
+  const hSrc = map.getSource("ai-polygon-highlights");
+  const heatSrc = map.getSource("ai-heatmap");
+  const chorSrc = map.getSource("ai-choropleth");
+  if (hSrc) hSrc.setData(empty);
+  if (heatSrc) heatSrc.setData(empty);
+  if (chorSrc) chorSrc.setData(empty);
+  agentMapState = {
+    realizationId: null,
+    objectType: null,
+    availableViews: [],
+    results: [],
+    activeIdx: -1,
+    choroplethMetric: null,
+    heatmapWeightColumn: null,
+  };
+}
+
+function renderRealization(data) {
+  const results = data.results || [];
+  const objType = data.object_type || "markers";
+  agentMapState.objectType = objType;
+  agentMapState.availableViews = data.available_views || ["markers"];
+  agentMapState.results = results;
+  agentMapState.choroplethMetric = data.choropleth_metric || null;
+  agentMapState.heatmapWeightColumn = data.heatmap_weight_column || null;
+
+  if (objType === "polygon_highlights") {
+    renderPolygonHighlightsRealization(results);
+  } else if (objType === "heatmap") {
+    renderHeatmapRealization(results, data.heatmap_weight_column || "_score");
+  } else if (objType === "choropleth") {
+    renderChoroplethRealization(results, data.choropleth_metric);
+  } else {
+    renderMarkersRealization(results);
+  }
+}
+
+function renderMarkersRealization(results) {
+  showAiResults(results);
+}
+
+function renderPolygonHighlightsRealization(results) {
+  // Build FeatureCollection from result geometries
+  const features = results
+    .filter((r) => r.geometry && typeof r.geometry === "object")
+    .map((r) => ({
+      type: "Feature",
+      properties: { ...r, geometry: undefined },
+      geometry: r.geometry,
+    }));
+
+  const src = map.getSource("ai-polygon-highlights");
+  if (src) src.setData({ type: "FeatureCollection", features });
+
+  // Also place centroid markers for card-list click interaction
+  // (lighter weight markers — no rank number for polygon mode)
+  clearAiMarkers();
+  results.forEach((result, idx) => {
+    if (!result.lng || !result.lat) return;
+    const el = document.createElement("div");
+    el.className = "ai-marker-poly";
+    el.dataset.idx = idx;
+    el.textContent = result._rank !== undefined ? result._rank + 1 : idx + 1;
+    const m = new maplibregl.Marker({ element: el })
+      .setLngLat([result.lng, result.lat])
+      .addTo(map);
+    el.addEventListener("click", () => selectAiResult(idx, results));
+    aiMarkers.push({ marker: m, result });
+  });
+
+  // Fit bounds to polygons
+  if (features.length > 0) {
+    let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity;
+    results.forEach((r) => {
+      if (r.lng && r.lat) {
+        minLng = Math.min(minLng, r.lng); maxLng = Math.max(maxLng, r.lng);
+        minLat = Math.min(minLat, r.lat); maxLat = Math.max(maxLat, r.lat);
+      }
+    });
+    if (isFinite(minLng)) {
+      if (mapCollapsed) toggleMapPanel();
+      map.fitBounds([[minLng, minLat], [maxLng, maxLat]], { padding: 80, maxZoom: 16, duration: 1200 });
+    }
+  }
+}
+
+function renderHeatmapRealization(results, weightColumn) {
+  // Normalize weight to 0–1 range
+  const weights = results.map((r) => Number(r[weightColumn]) || 0).filter((v) => v > 0);
+  const maxW = weights.length ? Math.max(...weights) : 1;
+  const minW = weights.length ? Math.min(...weights) : 0;
+  const range = maxW - minW || 1;
+
+  const features = results
+    .filter((r) => r.lng && r.lat)
+    .map((r) => ({
+      type: "Feature",
+      properties: {
+        _heatmap_weight_normalized: ((Number(r[weightColumn]) || minW) - minW) / range,
+        ...r,
+        geometry: undefined,
+      },
+      geometry: { type: "Point", coordinates: [r.lng, r.lat] },
+    }));
+
+  const src = map.getSource("ai-heatmap");
+  if (src) src.setData({ type: "FeatureCollection", features });
+
+  // Fit bounds
+  if (features.length > 0) {
+    let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity;
+    results.forEach((r) => {
+      if (r.lng && r.lat) {
+        minLng = Math.min(minLng, r.lng); maxLng = Math.max(maxLng, r.lng);
+        minLat = Math.min(minLat, r.lat); maxLat = Math.max(maxLat, r.lat);
+      }
+    });
+    if (isFinite(minLng)) {
+      if (mapCollapsed) toggleMapPanel();
+      map.fitBounds([[minLng, minLat], [maxLng, maxLat]], { padding: 60, maxZoom: 14, duration: 1200 });
+    }
+  }
+}
+
+function buildChoroplethExpression(results, metric) {
+  const values = results.map((r) => Number(r[metric])).filter((v) => !isNaN(v));
+  if (!values.length) return "#3b82f6";
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const mid = (min + max) / 2;
+  return [
+    "interpolate", ["linear"], ["coalesce", ["get", metric], min],
+    min, "rgba(49,130,189,0.7)",
+    mid, "rgba(253,174,97,0.7)",
+    max, "rgba(215,48,31,0.8)",
+  ];
+}
+
+function renderChoroplethRealization(results, metric) {
+  const features = results
+    .filter((r) => r.geometry && typeof r.geometry === "object" &&
+      ["Polygon", "MultiPolygon"].includes(r.geometry.type))
+    .map((r) => ({
+      type: "Feature",
+      properties: { ...r, geometry: undefined },
+      geometry: r.geometry,
+    }));
+
+  const src = map.getSource("ai-choropleth");
+  if (src) src.setData({ type: "FeatureCollection", features });
+
+  // Set dynamic color ramp from actual data
+  if (metric && features.length) {
+    const expr = buildChoroplethExpression(results, metric);
+    map.setPaintProperty("ai-choropleth-fill", "fill-color", expr);
+    map.setPaintProperty("ai-choropleth-outline", "line-color", "#3b82f6");
+  }
+
+  // Fit bounds
+  if (features.length > 0) {
+    let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity;
+    results.forEach((r) => {
+      if (r.lng && r.lat) {
+        minLng = Math.min(minLng, r.lng); maxLng = Math.max(maxLng, r.lng);
+        minLat = Math.min(minLat, r.lat); maxLat = Math.max(maxLat, r.lat);
+      }
+    });
+    if (isFinite(minLng)) {
+      if (mapCollapsed) toggleMapPanel();
+      map.fitBounds([[minLng, minLat], [maxLng, maxLat]], { padding: 60, maxZoom: 13, duration: 1200 });
+    }
+  }
 }
 
 document.getElementById("ai-results-close").addEventListener("click", () => {
