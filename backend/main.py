@@ -1077,6 +1077,84 @@ def get_layers():
     }
 
 
+# ── Planning visualization (Gemini 2.5 Flash — Nano Banana) ───────────────────
+
+VISUALIZE_MODEL = "gemini-2.5-flash-image"
+VISUALIZE_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{VISUALIZE_MODEL}:generateContent"
+
+
+class VisualizeRequest(BaseModel):
+    description: str
+    location: str = ""
+    decision: str = ""
+    plan_ref: str = ""
+
+
+@app.post("/api/planning/visualize")
+async def visualize_planning(req: VisualizeRequest):
+    """Generate an architectural visualization of a planning application using Gemini 2.5 Flash."""
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not set")
+
+    location_ctx = f" at {req.location}" if req.location else " in Dublin, Ireland"
+    decision_ctx = f" (planning {req.decision.lower()})" if req.decision else ""
+
+    prompt = (
+        f"Create an architectural before-and-after visualization{location_ctx}. "
+        f"The planning application{decision_ctx} describes: {req.description}. "
+        f"\n\nIMPORTANT: The NEW elements being added by this planning permission must be clearly highlighted and visually distinct. "
+        f"Render the NEW construction/additions in full vivid color with a subtle bright outline or glow effect, "
+        f"while showing the EXISTING surrounding buildings and streetscape in slightly muted/desaturated tones. "
+        f"This contrast should make it immediately obvious to the viewer exactly what is being built or changed. "
+        f"\n\nShow it from a clear street-level perspective during daytime. "
+        f"Professional architectural visualization style, realistic materials, natural lighting. "
+        f"Do NOT include any text, labels, watermarks, arrows, or written annotations in the image."
+    )
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseModalities": ["IMAGE", "TEXT"],
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{VISUALIZE_URL}?key={GEMINI_API_KEY}",
+                json=payload,
+            )
+            if resp.status_code != 200:
+                detail = resp.text[:500]
+                raise HTTPException(status_code=resp.status_code, detail=f"Gemini API error: {detail}")
+
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                raise HTTPException(status_code=500, detail="No response from Gemini")
+
+            # Find the image part in the response
+            parts = candidates[0].get("content", {}).get("parts", [])
+            for part in parts:
+                if "inlineData" in part:
+                    inline = part["inlineData"]
+                    return {
+                        "image": inline.get("data", ""),
+                        "mime_type": inline.get("mimeType", "image/png"),
+                        "prompt": prompt,
+                        "plan_ref": req.plan_ref,
+                    }
+
+            raise HTTPException(status_code=500, detail="No image in Gemini response")
+
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Image generation timed out")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image generation failed: {str(e)}")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}

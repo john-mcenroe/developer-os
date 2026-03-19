@@ -1089,3 +1089,76 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.15);
 }
+
+/* ── Visualize Button ──────────────────────────────────────────────────── */
+
+.visualize-container {
+  margin-top: 8px;
+}
+
+.visualize-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 14px 20px;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(59, 130, 246, 0.2));
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  border-radius: 10px;
+  color: #c4b5fd;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.visualize-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.25), rgba(59, 130, 246, 0.25));
+  border-color: rgba(139, 92, 246, 0.5);
+  color: #ddd6fe;
+}
+
+.visualize-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.visualize-btn.regenerate {
+  margin-top: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 8px 12px;
+}
+
+.visualize-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(139, 92, 246, 0.3);
+  border-top-color: #c4b5fd;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.visualize-result {
+  margin-top: 8px;
+}
+
+.visualize-image {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.visualize-error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #ef4444;
+}
