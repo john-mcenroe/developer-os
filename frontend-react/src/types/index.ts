@@ -156,3 +156,29 @@ export type FeatureProperties =
   | SoldPropertyProperties
   | CensusProperties
   | SideSiteProperties;
+
+/* ── AI Site Search ────────────────────────────────────────────────────── */
+
+export interface SiteSearchResult {
+  lng: number;
+  lat: number;
+  _score: number;
+  _rank: number;
+  _table: string;
+  opportunity_reason: string;
+  geometry?: GeoJSON.Geometry;
+  [key: string]: unknown;
+}
+
+export interface SiteSearchResponse {
+  type: 'map_realization';
+  object_type: string;
+  title: string;
+  summary: string;
+  results: SiteSearchResult[];
+  follow_ups: { label: string; prompt: string }[];
+  query_stats: { total: number; successful: number };
+  intent: string;
+}
+
+export type SearchPhase = 'idle' | 'routing' | 'hypotheses' | 'executing' | 'ranking' | 'done' | 'error';

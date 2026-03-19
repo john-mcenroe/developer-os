@@ -3,7 +3,6 @@ import MapGL, {
   Source,
   Layer,
   NavigationControl,
-  ScaleControl,
   type MapRef,
   type MapLayerMouseEvent,
   type ViewStateChangeEvent,
@@ -11,14 +10,16 @@ import MapGL, {
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 import { useMapData, useEnrichedParcel } from '../hooks/useMapData';
+import { useSiteSearch } from '../hooks/useSiteSearch';
 import { DUBLIN_CENTER, DEFAULT_ZOOM } from '../config/layers';
 import { LayerPanel } from './LayerPanel';
 import { SearchBar } from './SearchBar';
 import { DetailPanel } from './DetailPanel';
+import { SiteSearch } from './SiteSearch';
 import { ZoomIndicator } from './ZoomIndicator';
 import { BasemapToggle } from './BasemapToggle';
 
-import type { ViewState } from '../types';
+import type { ViewState, SiteSearchResult } from '../types';
 
 const OSM_STYLE = {
   version: 8 as const,
@@ -73,6 +74,74 @@ export function MapView() {
   const [selectedFeatureId, setSelectedFeatureId] = useState<number | null>(null);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const { data: enrichedData, loading: enrichedLoading, fetchEnriched, clear: clearEnriched } = useEnrichedParcel();
+
+  // AI Site Search
+  const siteSearch = useSiteSearch();
+  const [searchSelectedIndex, setSearchSelectedIndex] = useState<number | null>(null);
+
+  const TABLE_TO_DETAIL: Record<string, string> = {
+    sold_properties: 'sold',
+    cadastral_freehold: 'parcel',
+    cadastral_leasehold: 'parcel',
+    rzlt: 'rzlt',
+    dlr_planning_polygons: 'planning',
+    dlr_planning_points: 'planning',
+    census_small_areas: 'census',
+    side_sites: 'side_site',
+  };
+
+  const handleSiteSearch = useCallback((query: string) => {
+    const map = mapRef.current?.getMap();
+    let viewport: { sw: [number, number]; ne: [number, number] } | undefined;
+    if (map) {
+      const bounds = map.getBounds();
+      viewport = {
+        sw: [bounds.getWest(), bounds.getSouth()],
+        ne: [bounds.getEast(), bounds.getNorth()],
+      };
+    }
+    setSearchSelectedIndex(null);
+    siteSearch.search(query, viewport, viewState.zoom, Array.from(visibleLayers));
+  }, [siteSearch, viewState.zoom, visibleLayers]);
+
+  const handleSearchResultSelect = useCallback((result: SiteSearchResult, index: number) => {
+    setSearchSelectedIndex(index);
+
+    // Fly to result
+    if (result.lng && result.lat) {
+      mapRef.current?.flyTo({ center: [result.lng, result.lat], zoom: 16, duration: 1500 });
+    }
+
+    // Open detail panel
+    const detailType = TABLE_TO_DETAIL[result._table] || 'generic';
+    setSelectedType(detailType);
+    setSelectedProps(result as unknown as Record<string, unknown>);
+    setSelectedSourceId(null);
+    setSelectedFeatureId(null);
+
+    // If it's a parcel, fetch enriched data
+    if ((detailType === 'parcel') && result.id) {
+      const parcelType = result._table === 'cadastral_leasehold' ? 'leasehold' : 'freehold';
+      fetchEnriched(Number(result.id), parcelType);
+    } else {
+      clearEnriched();
+    }
+  }, [fetchEnriched, clearEnriched]);
+
+  const handleSearchClear = useCallback(() => {
+    siteSearch.clear();
+    setSearchSelectedIndex(null);
+  }, [siteSearch]);
+
+  // Build GeoJSON for search results markers
+  const searchResultsGeoJSON: GeoJSON.FeatureCollection = {
+    type: 'FeatureCollection',
+    features: siteSearch.results.map((r, i) => ({
+      type: 'Feature' as const,
+      geometry: r.geometry || { type: 'Point' as const, coordinates: [r.lng, r.lat] },
+      properties: { rank: i + 1, score: r._score, selected: searchSelectedIndex === i ? 1 : 0 },
+    })),
+  };
 
   const { scheduleLoad, loadAllLayers } = useMapData(mapRef, visibleLayers, viewState.zoom);
 
@@ -237,8 +306,7 @@ export function MapView() {
         style={{ width: '100%', height: '100%' }}
         attributionControl={false}
       >
-        <NavigationControl position="bottom-right" />
-        <ScaleControl position="bottom-left" maxWidth={200} />
+        <NavigationControl position="top-right" />
 
         {/* === Cadastral Freehold === */}
         <Source id="cadastral-freehold" type="geojson" data={EMPTY_FC}>
@@ -495,6 +563,37 @@ export function MapView() {
             paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
           />
         </Source>
+
+        {/* === AI Search Results === */}
+        {siteSearch.results.length > 0 && (
+          <Source id="ai-search-results" type="geojson" data={searchResultsGeoJSON}>
+            <Layer
+              id="ai-results-circles"
+              type="circle"
+              paint={{
+                'circle-radius': ['case', ['==', ['get', 'selected'], 1], 14, 10],
+                'circle-color': ['case', ['==', ['get', 'selected'], 1], '#8b5cf6', '#3b82f6'],
+                'circle-stroke-width': 2,
+                'circle-stroke-color': '#ffffff',
+                'circle-opacity': 0.9,
+              }}
+            />
+            <Layer
+              id="ai-results-labels"
+              type="symbol"
+              layout={{
+                'text-field': ['to-string', ['get', 'rank']],
+                'text-size': 11,
+                'text-font': ['Open Sans Bold'],
+                'text-allow-overlap': true,
+                'text-ignore-placement': true,
+              }}
+              paint={{
+                'text-color': '#ffffff',
+              }}
+            />
+          </Source>
+        )}
       </MapGL>
 
       {/* Overlay controls */}
@@ -504,6 +603,24 @@ export function MapView() {
         <BasemapToggle basemap={basemap} onToggle={() => setBasemap((b) => (b === 'map' ? 'satellite' : 'map'))} />
         <ZoomIndicator zoom={viewState.zoom} />
       </div>
+
+      <SiteSearch
+        results={siteSearch.results}
+        title={siteSearch.title}
+        summary={siteSearch.summary}
+        followUps={siteSearch.followUps}
+        isLoading={siteSearch.isLoading}
+        phase={siteSearch.phase}
+        phaseMessage={siteSearch.phaseMessage}
+        error={siteSearch.error}
+        hypothesesCount={siteSearch.hypothesesCount}
+        hypothesesNames={siteSearch.hypothesesNames}
+        queriesCompleted={siteSearch.queriesCompleted}
+        selectedIndex={searchSelectedIndex}
+        onSearch={handleSiteSearch}
+        onClear={handleSearchClear}
+        onSelectResult={handleSearchResultSelect}
+      />
 
       <DetailPanel
         type={selectedType}
