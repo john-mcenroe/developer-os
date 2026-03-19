@@ -1,0 +1,517 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import MapGL, {
+  Source,
+  Layer,
+  NavigationControl,
+  ScaleControl,
+  type MapRef,
+  type MapLayerMouseEvent,
+  type ViewStateChangeEvent,
+} from 'react-map-gl/maplibre';
+import 'maplibre-gl/dist/maplibre-gl.css';
+
+import { useMapData, useEnrichedParcel } from '../hooks/useMapData';
+import { DUBLIN_CENTER, DEFAULT_ZOOM } from '../config/layers';
+import { LayerPanel } from './LayerPanel';
+import { SearchBar } from './SearchBar';
+import { DetailPanel } from './DetailPanel';
+import { ZoomIndicator } from './ZoomIndicator';
+import { BasemapToggle } from './BasemapToggle';
+
+import type { ViewState } from '../types';
+
+const OSM_STYLE = {
+  version: 8 as const,
+  sources: {
+    osm: {
+      type: 'raster' as const,
+      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      maxzoom: 19,
+    },
+  },
+  layers: [{ id: 'osm-tiles', type: 'raster' as const, source: 'osm' }],
+};
+
+const SATELLITE_STYLE = {
+  version: 8 as const,
+  sources: {
+    satellite: {
+      type: 'raster' as const,
+      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+      tileSize: 256,
+      attribution: '&copy; Esri',
+      maxzoom: 19,
+    },
+  },
+  layers: [{ id: 'satellite-tiles', type: 'raster' as const, source: 'satellite' }],
+};
+
+const EMPTY_FC: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
+
+export function MapView() {
+  const mapRef = useRef<MapRef | null>(null);
+  const [viewState, setViewState] = useState<ViewState>({
+    longitude: DUBLIN_CENTER.longitude,
+    latitude: DUBLIN_CENTER.latitude,
+    zoom: DEFAULT_ZOOM,
+  });
+  const [basemap, setBasemap] = useState<'map' | 'satellite'>('map');
+  const [visibleLayers, setVisibleLayers] = useState<Set<string>>(() => {
+    const initial = new Set<string>();
+    initial.add('cadastral_freehold');
+    initial.add('cadastral_leasehold');
+    initial.add('dlr_planning_polygons');
+    initial.add('sold_properties');
+    return initial;
+  });
+
+  // Detail panel state
+  const [selectedType, setSelectedType] = useState<string | null>(null);
+  const [selectedProps, setSelectedProps] = useState<Record<string, unknown> | null>(null);
+  const [selectedFeatureId, setSelectedFeatureId] = useState<number | null>(null);
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
+  const { data: enrichedData, loading: enrichedLoading, fetchEnriched, clear: clearEnriched } = useEnrichedParcel();
+
+  const { scheduleLoad, loadAllLayers } = useMapData(mapRef, visibleLayers, viewState.zoom);
+
+  // Load data on mount and when view/layers change
+  const handleMoveEnd = useCallback(
+    (e: ViewStateChangeEvent) => {
+      setViewState(e.viewState);
+      scheduleLoad();
+    },
+    [scheduleLoad]
+  );
+
+  const handleLoad = useCallback(() => {
+    loadAllLayers();
+  }, [loadAllLayers]);
+
+  // Reload when visible layers change
+  useEffect(() => {
+    loadAllLayers();
+  }, [visibleLayers, loadAllLayers]);
+
+  const toggleLayer = useCallback((layerId: string) => {
+    setVisibleLayers((prev) => {
+      const next = new Set(prev);
+      if (next.has(layerId)) {
+        next.delete(layerId);
+      } else {
+        next.add(layerId);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleMapClick = useCallback(
+    (e: MapLayerMouseEvent) => {
+      const map = mapRef.current?.getMap();
+      if (!map) return;
+
+      // Query features at click point across all interactive layers
+      const interactiveLayers = [
+        'cadastral_freehold-fill',
+        'cadastral_leasehold-fill',
+        'dlr_planning_polygons-fill',
+        'dlr_planning_points-fill',
+        'sold_properties-fill',
+        'census_small_areas-fill',
+        'rzlt-fill',
+        'side_sites-fill',
+        'sd_lap_boundaries-fill',
+        'sd_planning_register-fill',
+      ].filter((id) => map.getLayer(id));
+
+      const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
+      if (!features || features.length === 0) {
+        setSelectedType(null);
+        setSelectedProps(null);
+        setSelectedFeatureId(null);
+        setSelectedSourceId(null);
+        clearEnriched();
+        return;
+      }
+
+      const feature = features[0];
+      const layerId = feature.layer.id;
+      const props = feature.properties || {};
+      const fid = feature.id != null ? Number(feature.id) : null;
+
+      // Track selection for highlight
+      setSelectedFeatureId(fid);
+
+      if (layerId.startsWith('cadastral_freehold')) {
+        setSelectedType('parcel');
+        setSelectedProps({ ...props, type: 'freehold' });
+        setSelectedSourceId('cadastral-freehold');
+        if (fid) fetchEnriched(fid, 'freehold');
+      } else if (layerId.startsWith('cadastral_leasehold')) {
+        setSelectedType('parcel');
+        setSelectedProps({ ...props, type: 'leasehold' });
+        setSelectedSourceId('cadastral-leasehold');
+        if (fid) fetchEnriched(fid, 'leasehold');
+      } else if (layerId.startsWith('dlr_planning_polygons') || layerId.startsWith('dlr_planning_points')) {
+        setSelectedType('planning');
+        setSelectedProps(props);
+        setSelectedSourceId('dlr-planning-polygons');
+      } else if (layerId.startsWith('sold_properties')) {
+        setSelectedType('sold');
+        setSelectedProps(props);
+        setSelectedSourceId('sold-properties');
+      } else if (layerId.startsWith('census_small_areas')) {
+        setSelectedType('census');
+        setSelectedProps(props);
+        setSelectedSourceId('census-small-areas');
+      } else if (layerId.startsWith('rzlt')) {
+        setSelectedType('rzlt');
+        setSelectedProps(props);
+        setSelectedSourceId('rzlt');
+      } else if (layerId.startsWith('side_sites')) {
+        setSelectedType('side_site');
+        setSelectedProps(props);
+        setSelectedSourceId('side-sites');
+      } else if (layerId.startsWith('sd_lap')) {
+        setSelectedType('lap');
+        setSelectedProps(props);
+        setSelectedSourceId('sd-lap-boundaries');
+      } else if (layerId.startsWith('sd_planning')) {
+        setSelectedType('sd_planning');
+        setSelectedProps(props);
+        setSelectedSourceId('sd-planning-register');
+      } else {
+        setSelectedType('generic');
+        setSelectedProps(props);
+        setSelectedSourceId(null);
+      }
+    },
+    [fetchEnriched, clearEnriched]
+  );
+
+  const handleCursorChange = useCallback((e: MapLayerMouseEvent) => {
+    const map = mapRef.current?.getMap();
+    if (!map) return;
+    const interactiveLayers = [
+      'cadastral_freehold-fill', 'cadastral_leasehold-fill',
+      'dlr_planning_polygons-fill', 'dlr_planning_points-fill',
+      'sold_properties-fill', 'census_small_areas-fill', 'rzlt-fill',
+      'side_sites-fill', 'sd_lap_boundaries-fill', 'sd_planning_register-fill',
+    ].filter((id) => map.getLayer(id));
+    const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
+    map.getCanvas().style.cursor = features.length > 0 ? 'pointer' : '';
+  }, []);
+
+  const handleSearchSelect = useCallback((lng: number, lat: number) => {
+    mapRef.current?.flyTo({ center: [lng, lat], zoom: 15, duration: 1500 });
+  }, []);
+
+  const closeDetail = useCallback(() => {
+    setSelectedType(null);
+    setSelectedProps(null);
+    setSelectedFeatureId(null);
+    setSelectedSourceId(null);
+    clearEnriched();
+  }, [clearEnriched]);
+
+  const mapStyle = basemap === 'map' ? OSM_STYLE : SATELLITE_STYLE;
+
+  // Selection filter: show only the selected feature
+  const selFilter = (sourceId: string): maplibregl.ExpressionSpecification =>
+    selectedSourceId === sourceId && selectedFeatureId != null
+      ? ['==', ['id'], selectedFeatureId]
+      : ['==', ['id'], -1]; // match nothing
+
+  return (
+    <div className="map-container">
+      <MapGL
+        ref={mapRef}
+        {...viewState}
+        onMove={(e) => setViewState(e.viewState)}
+        onMoveEnd={handleMoveEnd}
+        onLoad={handleLoad}
+        onClick={handleMapClick}
+        onMouseMove={handleCursorChange}
+        mapStyle={mapStyle as unknown as maplibregl.StyleSpecification}
+        style={{ width: '100%', height: '100%' }}
+        attributionControl={false}
+      >
+        <NavigationControl position="bottom-right" />
+        <ScaleControl position="bottom-left" maxWidth={200} />
+
+        {/* === Cadastral Freehold === */}
+        <Source id="cadastral-freehold" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="cadastral_freehold-fill"
+            type="fill"
+            paint={{ 'fill-color': 'rgba(255, 165, 0, 0.15)', 'fill-outline-color': 'rgba(255, 140, 0, 0)' }}
+          />
+          <Layer
+            id="cadastral_freehold-outline"
+            type="line"
+            paint={{ 'line-color': '#ff8c00', 'line-width': 1 }}
+          />
+          <Layer
+            id="cadastral_freehold-selected"
+            type="fill"
+            filter={selFilter('cadastral-freehold')}
+            paint={{ 'fill-color': 'rgba(255, 200, 0, 0.45)', 'fill-outline-color': '#ffc800' }}
+          />
+          <Layer
+            id="cadastral_freehold-selected-outline"
+            type="line"
+            filter={selFilter('cadastral-freehold')}
+            paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+          />
+        </Source>
+
+        {/* === Cadastral Leasehold === */}
+        <Source id="cadastral-leasehold" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="cadastral_leasehold-fill"
+            type="fill"
+            paint={{ 'fill-color': 'rgba(100, 149, 237, 0.15)', 'fill-outline-color': 'rgba(100, 149, 237, 0)' }}
+          />
+          <Layer
+            id="cadastral_leasehold-outline"
+            type="line"
+            paint={{ 'line-color': '#6495ed', 'line-width': 1 }}
+          />
+          <Layer
+            id="cadastral_leasehold-selected"
+            type="fill"
+            filter={selFilter('cadastral-leasehold')}
+            paint={{ 'fill-color': 'rgba(100, 200, 255, 0.45)', 'fill-outline-color': '#64c8ff' }}
+          />
+          <Layer
+            id="cadastral_leasehold-selected-outline"
+            type="line"
+            filter={selFilter('cadastral-leasehold')}
+            paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+          />
+        </Source>
+
+        {/* === RZLT === */}
+        <Source id="rzlt" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="rzlt-fill"
+            type="fill"
+            paint={{ 'fill-color': 'rgba(239, 68, 68, 0.2)', 'fill-outline-color': 'rgba(239, 68, 68, 0)' }}
+          />
+          <Layer
+            id="rzlt-outline"
+            type="line"
+            paint={{ 'line-color': '#ef4444', 'line-width': 2 }}
+          />
+          <Layer
+            id="rzlt-selected"
+            type="line"
+            filter={selFilter('rzlt')}
+            paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+          />
+        </Source>
+
+        {/* === DLR Planning Polygons === */}
+        <Source id="dlr-planning-polygons" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="dlr_planning_polygons-fill"
+            type="fill"
+            paint={{ 'fill-color': 'rgba(46, 204, 113, 0.25)', 'fill-outline-color': 'rgba(46, 204, 113, 0)' }}
+          />
+          <Layer
+            id="dlr_planning_polygons-outline"
+            type="line"
+            paint={{ 'line-color': '#2ecc71', 'line-width': 2 }}
+          />
+          <Layer
+            id="dlr_planning_polygons-selected"
+            type="fill"
+            filter={selFilter('dlr-planning-polygons')}
+            paint={{ 'fill-color': 'rgba(46, 204, 113, 0.5)', 'fill-outline-color': '#27ae60' }}
+          />
+          <Layer
+            id="dlr_planning_polygons-selected-outline"
+            type="line"
+            filter={selFilter('dlr-planning-polygons')}
+            paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+          />
+        </Source>
+
+        {/* === DLR Planning Points === */}
+        <Source id="dlr-planning-points" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="dlr_planning_points-fill"
+            type="circle"
+            paint={{
+              'circle-radius': 5,
+              'circle-color': '#27ae60',
+              'circle-stroke-color': '#1e8449',
+              'circle-stroke-width': 1,
+            }}
+          />
+        </Source>
+
+        {/* === Sold Properties === */}
+        <Source id="sold-properties" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="sold_properties-fill"
+            type="circle"
+            paint={{
+              'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 3, 16, 6, 18, 9],
+              'circle-color': [
+                'interpolate', ['linear'], ['coalesce', ['get', 'sale_price'], 0],
+                100000, '#f1c40f',
+                300000, '#e67e22',
+                500000, '#e74c3c',
+                1000000, '#8e44ad',
+                3000000, '#2c3e50',
+              ],
+              'circle-stroke-color': '#fff',
+              'circle-stroke-width': 0.5,
+              'circle-opacity': 0.85,
+            }}
+          />
+        </Source>
+
+        {/* === Census Small Areas === */}
+        <Source id="census-small-areas" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="census_small_areas-fill"
+            type="fill"
+            paint={{
+              'fill-color': [
+                'interpolate', ['linear'], ['coalesce', ['get', 'population_density'], 0],
+                0, 'rgba(0, 188, 212, 0.05)',
+                2000, 'rgba(0, 188, 212, 0.15)',
+                10000, 'rgba(0, 188, 212, 0.3)',
+                30000, 'rgba(0, 150, 136, 0.45)',
+                80000, 'rgba(0, 105, 92, 0.6)',
+              ],
+              'fill-outline-color': 'rgba(0, 188, 212, 0)',
+            }}
+          />
+          <Layer
+            id="census_small_areas-outline"
+            type="line"
+            paint={{ 'line-color': '#00bcd4', 'line-width': 0.5 }}
+          />
+          <Layer
+            id="census_small_areas-selected"
+            type="fill"
+            filter={selFilter('census-small-areas')}
+            paint={{ 'fill-color': 'rgba(0, 230, 255, 0.4)', 'fill-outline-color': '#00e5ff' }}
+          />
+          <Layer
+            id="census_small_areas-selected-outline"
+            type="line"
+            filter={selFilter('census-small-areas')}
+            paint={{ 'line-color': '#ffffff', 'line-width': 2.5 }}
+          />
+        </Source>
+
+        {/* === Urban Areas === */}
+        <Source id="urban-areas" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="urban_areas-fill"
+            type="fill"
+            paint={{ 'fill-color': 'rgba(0, 150, 136, 0.1)', 'fill-outline-color': 'rgba(0, 150, 136, 0)' }}
+          />
+          <Layer
+            id="urban_areas-outline"
+            type="line"
+            paint={{ 'line-color': '#009688', 'line-width': 2 }}
+          />
+        </Source>
+
+        {/* === SD LAP Boundaries === */}
+        <Source id="sd-lap-boundaries" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="sd_lap_boundaries-fill"
+            type="fill"
+            paint={{ 'fill-color': 'rgba(155, 89, 182, 0.1)', 'fill-outline-color': 'rgba(155, 89, 182, 0)' }}
+          />
+          <Layer
+            id="sd_lap_boundaries-outline"
+            type="line"
+            paint={{ 'line-color': '#9b59b6', 'line-width': 2.5, 'line-dasharray': [6, 3] }}
+          />
+        </Source>
+
+        {/* === SD Planning Register === */}
+        <Source id="sd-planning-register" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="sd_planning_register-fill"
+            type="fill"
+            paint={{
+              'fill-color': [
+                'match', ['coalesce', ['get', 'status'], ''],
+                'Grant', '#2ecc71',
+                'Refuse', '#e74c3c',
+                '#e67e22',
+              ],
+              'fill-opacity': 0.25,
+            }}
+          />
+          <Layer
+            id="sd_planning_register-outline"
+            type="line"
+            paint={{
+              'line-color': [
+                'match', ['coalesce', ['get', 'status'], ''],
+                'Grant', '#2ecc71',
+                'Refuse', '#e74c3c',
+                '#e67e22',
+              ],
+              'line-width': 2,
+            }}
+          />
+        </Source>
+
+        {/* === Side Sites === */}
+        <Source id="side-sites" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="side_sites-fill"
+            type="fill"
+            paint={{
+              'fill-color': [
+                'interpolate', ['linear'], ['coalesce', ['get', 'score'], 0],
+                0.3, 'rgba(255, 235, 59, 0.25)',
+                0.6, 'rgba(255, 193, 7, 0.4)',
+                0.8, 'rgba(255, 152, 0, 0.55)',
+              ],
+              'fill-outline-color': 'rgba(255, 193, 7, 0)',
+            }}
+          />
+          <Layer
+            id="side_sites-outline"
+            type="line"
+            paint={{ 'line-color': '#f9a825', 'line-width': 2 }}
+          />
+          <Layer
+            id="side_sites-selected"
+            type="line"
+            filter={selFilter('side-sites')}
+            paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+          />
+        </Source>
+      </MapGL>
+
+      {/* Overlay controls */}
+      <div className="map-overlays">
+        <SearchBar onSelectResult={handleSearchSelect} />
+        <LayerPanel visibleLayers={visibleLayers} onToggleLayer={toggleLayer} zoom={viewState.zoom} />
+        <BasemapToggle basemap={basemap} onToggle={() => setBasemap((b) => (b === 'map' ? 'satellite' : 'map'))} />
+        <ZoomIndicator zoom={viewState.zoom} />
+      </div>
+
+      <DetailPanel
+        type={selectedType}
+        properties={selectedProps}
+        enrichedData={enrichedData}
+        enrichedLoading={enrichedLoading}
+        onClose={closeDetail}
+      />
+    </div>
+  );
+}
