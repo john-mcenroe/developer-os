@@ -119,6 +119,8 @@ export interface EnrichedParcel {
     recent?: Array<{
       address: string;
       sale_price: number;
+      sale_date?: string;
+      property_type?: string | null;
       distance_m: number;
     }>;
   };
@@ -127,6 +129,9 @@ export interface EnrichedParcel {
     description: string;
     decision: string;
     distance_m: number;
+    reg_date?: string;
+    dec_date?: string;
+    location?: string;
   }>;
   census?: CensusProperties;
 }

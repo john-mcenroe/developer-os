@@ -438,6 +438,36 @@ body {
   scrollbar-color: rgba(255, 255, 255, 0.06) transparent;
 }
 
+/* ── Parcel Name Card ──────────────────────────────────────────────────── */
+.parcel-name-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+}
+
+.parcel-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.3;
+  margin-bottom: 4px;
+}
+
+.parcel-ref {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-wrap: wrap;
+}
+
+.parcel-ref-sep {
+  margin: 0 6px;
+  color: var(--border-light);
+}
+
 /* ── Card System ───────────────────────────────────────────────────────── */
 .detail-cards {
   display: flex;
@@ -505,6 +535,132 @@ body {
   color: var(--text-secondary);
   line-height: 1.6;
   margin: 0;
+}
+
+/* ── Expandable Card ───────────────────────────────────────────────────── */
+.card-expand-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 14px;
+  background: var(--bg-primary);
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.card-expand-btn:hover {
+  background: var(--bg-hover);
+  color: var(--accent-hover);
+}
+
+.expandable-list {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Expandable Sale Items ─────────────────────────────────────────────── */
+.sale-item-expandable {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.sale-item-expandable:last-child {
+  border-bottom: none;
+}
+
+.sale-item-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  cursor: pointer;
+  transition: background var(--transition);
+  border-radius: 4px;
+}
+
+.sale-item-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.sale-chevron {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition: transform 0.2s;
+}
+
+.sale-item-detail {
+  padding: 4px 0 10px 0;
+  margin-left: 2px;
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+  animation: slideDown 0.15s ease-out;
+}
+
+/* ── Expandable Planning Items ─────────────────────────────────────────── */
+.planning-item-expandable {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 8px 0;
+}
+
+.planning-item-expandable:last-child {
+  border-bottom: none;
+}
+
+.planning-item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  transition: background var(--transition);
+  border-radius: 4px;
+}
+
+.planning-item-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.planning-item-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.planning-chevron {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition: transform 0.2s;
+}
+
+.planning-item-preview {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  margin-top: 4px;
+}
+
+.planning-item-detail {
+  margin-top: 8px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border);
+  animation: slideDown 0.15s ease-out;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* ── Hero Card (Key Metrics) ───────────────────────────────────────────── */

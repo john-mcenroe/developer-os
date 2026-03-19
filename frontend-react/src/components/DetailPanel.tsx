@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import type {
   EnrichedParcel,
   PlanningProperties,
@@ -118,6 +118,46 @@ function Card({ title, subtitle, accent, badge, children }: {
   );
 }
 
+function ExpandableCard({ title, subtitle, accent, badge, previewCount, children, allChildren }: {
+  title: string;
+  subtitle?: string;
+  accent?: string;
+  badge?: React.ReactNode;
+  previewCount: number;
+  children: React.ReactNode;
+  allChildren: React.ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div className="card-header-left">
+          {accent && <span className="card-accent" style={{ backgroundColor: accent }} />}
+          <span className="card-title">{title}</span>
+          {subtitle && <span className="card-subtitle">{subtitle}</span>}
+        </div>
+        {badge && <span className="card-badge">{badge}</span>}
+      </div>
+      <div className="card-body">
+        {expanded ? allChildren : children}
+      </div>
+      <button
+        className="card-expand-btn"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span>{expanded ? 'Show less' : `Show all ${previewCount}`}</span>
+        <svg
+          width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+          style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }}
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 function HeroStat({ value, label, color }: { value: string; label: string; color?: string }) {
   return (
     <div className="hero-stat">
@@ -146,6 +186,84 @@ function Tag({ text, color }: { text: string; color: string }) {
   );
 }
 
+/* ── Expandable Sale Item ──────────────────────────────────────────────── */
+
+function SaleItem({ sale, defaultExpanded }: {
+  sale: { address: string; sale_price: number; sale_date?: string; property_type?: string | null; distance_m: number };
+  defaultExpanded?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded || false);
+
+  return (
+    <div className={`sale-item-expandable ${expanded ? 'expanded' : ''}`}>
+      <div className="sale-item-row" onClick={() => setExpanded(!expanded)}>
+        <span className="sale-price">€{sale.sale_price?.toLocaleString() || '—'}</span>
+        <span className="sale-address">
+          {sale.address ? (sale.address.length > 26 ? sale.address.substring(0, 26) + '...' : sale.address) : '—'}
+        </span>
+        <span className="sale-distance">{sale.distance_m != null ? `${sale.distance_m}m` : ''}</span>
+        <svg
+          className="sale-chevron"
+          width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+          style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0)' }}
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </div>
+      {expanded && (
+        <div className="sale-item-detail">
+          <Row label="Full Address" value={sale.address || '—'} />
+          <Row label="Sale Date" value={sale.sale_date || '—'} />
+          {sale.property_type && <Row label="Type" value={sale.property_type} />}
+          <Row label="Distance" value={`${sale.distance_m}m from site`} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Expandable Planning Item ──────────────────────────────────────────── */
+
+function PlanningItem({ pl, defaultExpanded }: {
+  pl: { plan_ref: string; description: string; decision: string; distance_m: number; reg_date?: string; dec_date?: string; location?: string };
+  defaultExpanded?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded || false);
+  const isGranted = pl.decision?.toUpperCase().includes('GRANT');
+  const isRefused = pl.decision?.toUpperCase().includes('REFUS');
+  const statusColor = isGranted ? '#2ecc71' : isRefused ? '#e74c3c' : '#f59e0b';
+  const statusLabel = isGranted ? 'Granted' : isRefused ? 'Refused' : 'Pending';
+
+  return (
+    <div className={`planning-item-expandable ${expanded ? 'expanded' : ''}`}>
+      <div className="planning-item-row" onClick={() => setExpanded(!expanded)}>
+        <div className="planning-item-left">
+          <span className="planning-ref">{pl.plan_ref || '—'}</span>
+          <Tag text={statusLabel} color={statusColor} />
+        </div>
+        <svg
+          className="planning-chevron"
+          width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+          style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0)' }}
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </div>
+      <div className="planning-item-preview">
+        {pl.description ? (expanded ? '' : (pl.description.length > 55 ? pl.description.substring(0, 55) + '...' : pl.description)) : '—'}
+      </div>
+      {expanded && (
+        <div className="planning-item-detail">
+          <Row label="Description" value={pl.description || '—'} />
+          <Row label="Decision" value={pl.decision || '—'} color={statusColor} />
+          <Row label="Distance" value={`${pl.distance_m}m from site`} />
+          {pl.location && <Row label="Location" value={pl.location} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Enriched Parcel (Site Intelligence) ───────────────────────────────── */
 
 function EnrichedParcelDetail({ data }: { data: EnrichedParcel }) {
@@ -155,8 +273,26 @@ function EnrichedParcelDetail({ data }: { data: EnrichedParcel }) {
   const hasRzlt = data.rzlt_overlap && data.rzlt_overlap.length > 0;
   const hasSales = data.nearby_sales && data.nearby_sales.count > 0;
 
+  // Derive a display name from the nearest sale address or cadastral ref
+  const nearestAddress = data.nearby_sales?.recent?.[0]?.address;
+  const parcelName = nearestAddress
+    ? nearestAddress.split(',').slice(0, 2).join(', ')
+    : `Parcel ${p.national_ref || p.id}`;
+
   return (
     <div className="detail-cards">
+      {/* Parcel Identity Header */}
+      <div className="parcel-name-card">
+        <div className="parcel-name">{parcelName}</div>
+        <div className="parcel-ref">
+          Ref {p.national_ref || '—'}
+          <span className="parcel-ref-sep">·</span>
+          {typeLabel}
+          <span className="parcel-ref-sep">·</span>
+          ID {p.id}
+        </div>
+      </div>
+
       {/* Hero: Key metrics */}
       <div className="hero-card">
         <div className="hero-grid">
@@ -203,20 +339,14 @@ function EnrichedParcelDetail({ data }: { data: EnrichedParcel }) {
         </div>
       )}
 
-      {/* Parcel Identity */}
-      <Card title="Parcel" accent={typeColor}>
-        <Row label="Cadastral Ref" value={p.national_ref || '—'} mono />
-        <Row label="Type" value={typeLabel} color={typeColor} />
-        {p.area_sqm && <Row label="Area" value={`${p.area_sqm.toLocaleString()} m²`} />}
-      </Card>
+      {/* Comparable Sales — expandable */}
+      {hasSales && (() => {
+        const recent = data.nearby_sales!.recent || [];
+        const totalCount = data.nearby_sales!.count;
+        const previewItems = recent.slice(0, 3);
+        const hasMore = recent.length > 3 || totalCount > 3;
 
-      {/* Nearby Sales */}
-      {hasSales && (
-        <Card
-          title="Comparable Sales"
-          subtitle={`${data.nearby_sales!.count} within 500m`}
-          accent="#e74c3c"
-        >
+        const statsBlock = (
           <div className="stat-row-group">
             <Row label="Average" value={`€${data.nearby_sales!.avg_sale_price.toLocaleString()}`} color="#e74c3c" />
             <Row label="Median" value={`€${data.nearby_sales!.median_sale_price.toLocaleString()}`} />
@@ -224,51 +354,95 @@ function EnrichedParcelDetail({ data }: { data: EnrichedParcel }) {
               <Row label="Avg €/m²" value={`€${data.nearby_sales!.avg_price_per_sqm.toLocaleString()}`} />
             )}
           </div>
-          {data.nearby_sales!.recent && data.nearby_sales!.recent.length > 0 && (
-            <div className="sale-list">
-              {data.nearby_sales!.recent.slice(0, 4).map((s, i) => (
-                <div key={i} className="sale-item">
-                  <span className="sale-price">€{s.sale_price?.toLocaleString() || '—'}</span>
-                  <span className="sale-address">
-                    {s.address ? (s.address.length > 28 ? s.address.substring(0, 28) + '...' : s.address) : '—'}
-                  </span>
-                  <span className="sale-distance">{s.distance_m != null ? `${s.distance_m}m` : ''}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
-      )}
+        );
 
-      {/* Planning Activity */}
-      {data.nearby_planning && data.nearby_planning.length > 0 && (
-        <Card
-          title="Planning"
-          subtitle={`${data.nearby_planning.length} within 500m`}
-          accent="#2ecc71"
-        >
-          {data.nearby_planning.slice(0, 4).map((pl, i) => {
-            const isGranted = pl.decision?.toUpperCase().includes('GRANT');
-            const isRefused = pl.decision?.toUpperCase().includes('REFUS');
-            const statusColor = isGranted ? '#2ecc71' : isRefused ? '#e74c3c' : '#f59e0b';
-            const statusLabel = isGranted ? 'Granted' : isRefused ? 'Refused' : 'Pending';
-            return (
-              <div key={i} className="planning-item">
-                <div className="planning-item-top">
-                  <span className="planning-ref">{pl.plan_ref || '—'}</span>
-                  <Tag text={statusLabel} color={statusColor} />
-                </div>
-                <div className="planning-desc">
-                  {pl.description ? (pl.description.length > 60 ? pl.description.substring(0, 60) + '...' : pl.description) : '—'}
-                </div>
-                {pl.distance_m != null && (
-                  <span className="planning-distance">{pl.distance_m}m away</span>
-                )}
+        const previewContent = (
+          <>
+            {statsBlock}
+            {previewItems.length > 0 && (
+              <div className="expandable-list">
+                {previewItems.map((s, i) => (
+                  <SaleItem key={i} sale={s} />
+                ))}
               </div>
-            );
-          })}
-        </Card>
-      )}
+            )}
+          </>
+        );
+
+        const fullContent = (
+          <>
+            {statsBlock}
+            {recent.length > 0 && (
+              <div className="expandable-list">
+                {recent.map((s, i) => (
+                  <SaleItem key={i} sale={s} defaultExpanded={i === 0} />
+                ))}
+              </div>
+            )}
+          </>
+        );
+
+        if (hasMore) {
+          return (
+            <ExpandableCard
+              title="Comparable Sales"
+              subtitle={`${totalCount} within 500m`}
+              accent="#e74c3c"
+              previewCount={totalCount}
+              children={previewContent}
+              allChildren={fullContent}
+            />
+          );
+        }
+
+        return (
+          <Card title="Comparable Sales" subtitle={`${totalCount} within 500m`} accent="#e74c3c">
+            {previewContent}
+          </Card>
+        );
+      })()}
+
+      {/* Planning Activity — expandable */}
+      {data.nearby_planning && data.nearby_planning.length > 0 && (() => {
+        const planning = data.nearby_planning!;
+        const previewItems = planning.slice(0, 3);
+        const hasMore = planning.length > 3;
+
+        const previewContent = (
+          <div className="expandable-list">
+            {previewItems.map((pl, i) => (
+              <PlanningItem key={i} pl={pl} />
+            ))}
+          </div>
+        );
+
+        const fullContent = (
+          <div className="expandable-list">
+            {planning.map((pl, i) => (
+              <PlanningItem key={i} pl={pl} defaultExpanded={i === 0} />
+            ))}
+          </div>
+        );
+
+        if (hasMore) {
+          return (
+            <ExpandableCard
+              title="Planning"
+              subtitle={`${planning.length} within 500m`}
+              accent="#2ecc71"
+              previewCount={planning.length}
+              children={previewContent}
+              allChildren={fullContent}
+            />
+          );
+        }
+
+        return (
+          <Card title="Planning" subtitle={`${planning.length} within 500m`} accent="#2ecc71">
+            {previewContent}
+          </Card>
+        );
+      })()}
 
       {/* Demographics */}
       {data.census && <CensusCard census={data.census} />}
@@ -282,6 +456,10 @@ function ParcelDetail({ props }: { props: Record<string, unknown> }) {
   const typeColor = p.type === 'leasehold' ? '#6495ed' : '#ff8c00';
   return (
     <div className="detail-cards">
+      <div className="parcel-name-card">
+        <div className="parcel-name">Parcel {String(p.national_ref || p.id || '—')}</div>
+        <div className="parcel-ref">{typeLabel}</div>
+      </div>
       <div className="hero-card">
         <div className="hero-grid">
           <HeroStat value={p.area_sqm ? `${Number(p.area_sqm).toLocaleString()} m²` : '—'} label="Site Area" />
