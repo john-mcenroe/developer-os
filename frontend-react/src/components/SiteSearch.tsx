@@ -46,9 +46,9 @@ export function SiteSearch({
 }: SiteSearchProps) {
   const [query, setQuery] = useState('');
   const [placeholderIdx, setPlaceholderIdx] = useState(0);
-  const [collapsed, setCollapsed] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   // Cycle placeholder text
   useEffect(() => {
@@ -58,11 +58,16 @@ export function SiteSearch({
     return () => clearInterval(interval);
   }, []);
 
-  // Scroll selected card into view
+  // Auto-expand when results arrive
   useEffect(() => {
-    if (selectedIndex != null && scrollRef.current) {
-      const cards = scrollRef.current.querySelectorAll('.result-card');
-      cards[selectedIndex]?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    if (results.length > 0) setExpanded(true);
+  }, [results.length]);
+
+  // Scroll selected item into view
+  useEffect(() => {
+    if (selectedIndex != null && listRef.current) {
+      const items = listRef.current.querySelectorAll('.search-result-item');
+      items[selectedIndex]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   }, [selectedIndex]);
 
@@ -70,15 +75,16 @@ export function SiteSearch({
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (results.length === 0) return;
-      if (e.key === 'ArrowLeft' && selectedIndex != null && selectedIndex > 0) {
+      if (e.key === 'ArrowUp' && selectedIndex != null && selectedIndex > 0) {
         onSelectResult(results[selectedIndex - 1], selectedIndex - 1);
         e.preventDefault();
-      } else if (e.key === 'ArrowRight' && selectedIndex != null && selectedIndex < results.length - 1) {
-        onSelectResult(results[selectedIndex + 1], selectedIndex + 1);
+      } else if (e.key === 'ArrowDown') {
+        const next = selectedIndex == null ? 0 : Math.min(selectedIndex + 1, results.length - 1);
+        onSelectResult(results[next], next);
         e.preventDefault();
       } else if (e.key === 'Escape') {
-        if (results.length > 0) {
-          setCollapsed(c => !c);
+        if (expanded && results.length > 0) {
+          setExpanded(false);
         } else {
           onClear();
         }
@@ -87,53 +93,56 @@ export function SiteSearch({
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [results, selectedIndex, onSelectResult, onClear]);
+  }, [results, selectedIndex, expanded, onSelectResult, onClear]);
 
   const handleSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim() || isLoading) return;
-    setCollapsed(false);
+    setExpanded(true);
     onSearch(query.trim());
   }, [query, isLoading, onSearch]);
 
   const handleFollowUp = useCallback((prompt: string) => {
     setQuery(prompt);
-    setCollapsed(false);
+    setExpanded(true);
     onSearch(prompt);
   }, [onSearch]);
 
   const hasResults = results.length > 0;
-  const showTray = (hasResults || isLoading) && !collapsed;
+  const showPanel = (hasResults || isLoading) && expanded;
 
   return (
     <div className="site-search">
-      {/* Results Tray */}
-      {showTray && (
-        <div className="results-tray">
+      {/* Expandable Results Panel — grows upward */}
+      {showPanel && (
+        <div className="search-results-panel">
           {/* Header */}
           {hasResults && (
-            <div className="results-tray-header">
-              <div className="results-tray-title-row">
-                <h3 className="results-tray-title">{title}</h3>
-                <span className="results-tray-count">{results.length} sites</span>
-                <button className="results-tray-collapse" onClick={() => setCollapsed(true)} aria-label="Collapse results">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <polyline points="6 15 12 9 18 15" />
+            <div className="search-results-header">
+              <div className="search-results-title-row">
+                <h3 className="search-results-title">{title}</h3>
+                <span className="search-results-badge">{results.length} sites</span>
+                <button
+                  className="search-results-toggle"
+                  onClick={() => setExpanded(false)}
+                  aria-label="Collapse"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <polyline points="6 9 12 15 18 9" />
                   </svg>
                 </button>
               </div>
-              {summary && <p className="results-tray-summary">{summary}</p>}
+              {summary && <p className="search-results-summary">{summary}</p>}
             </div>
           )}
 
-          {/* Loading skeleton */}
+          {/* Loading state */}
           {isLoading && !hasResults && (
-            <div className="results-tray-loading">
-              <div className="search-phase-indicator">
-                <span className="search-phase-dot" />
-                <span className="search-phase-text">{phaseMessage}</span>
+            <div className="search-loading">
+              <div className="search-loading-header">
+                <span className="search-loading-dot" />
+                <span className="search-loading-text">{phaseMessage}</span>
               </div>
-              {/* Show hypothesis names as they arrive */}
               {hypothesesNames.length > 0 && (
                 <div className="search-strategies">
                   {hypothesesNames.map((name, i) => (
@@ -147,12 +156,14 @@ export function SiteSearch({
                 </div>
               )}
               {hypothesesNames.length === 0 && (
-                <div className="results-skeleton-row">
-                  {[1, 2, 3, 4].map(i => (
-                    <div key={i} className="result-card-skeleton">
-                      <div className="skeleton-bar wide" />
-                      <div className="skeleton-bar" />
-                      <div className="skeleton-bar narrow" />
+                <div className="search-loading-skeleton">
+                  {[1, 2, 3].map(i => (
+                    <div key={i} className="skeleton-row">
+                      <div className="skeleton-circle" />
+                      <div className="skeleton-lines">
+                        <div className="skeleton-bar wide" />
+                        <div className="skeleton-bar" />
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -162,17 +173,17 @@ export function SiteSearch({
 
           {/* Error */}
           {error && (
-            <div className="results-tray-error">
-              <span className="results-error-icon">!</span>
+            <div className="search-results-error">
+              <span className="search-error-badge">!</span>
               {error}
             </div>
           )}
 
-          {/* Cards */}
+          {/* Scrollable result list */}
           {hasResults && (
-            <div className="results-tray-scroll" ref={scrollRef}>
+            <div className="search-results-list" ref={listRef}>
               {results.map((r, i) => (
-                <ResultCard
+                <SearchResultItem
                   key={`${r._rank}-${r.lng}-${r.lat}`}
                   result={r}
                   index={i}
@@ -185,7 +196,7 @@ export function SiteSearch({
 
           {/* Follow-ups */}
           {hasResults && followUps.length > 0 && (
-            <div className="results-follow-ups">
+            <div className="search-follow-ups">
               {followUps.slice(0, 3).map((f, i) => (
                 <button key={i} className="follow-up-chip" onClick={() => handleFollowUp(f.prompt)}>
                   {f.label}
@@ -196,17 +207,17 @@ export function SiteSearch({
         </div>
       )}
 
-      {/* Collapsed bar showing result count */}
-      {hasResults && collapsed && (
-        <button className="results-collapsed-bar" onClick={() => setCollapsed(false)}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polyline points="6 9 12 15 18 9" />
+      {/* Collapsed mini-bar */}
+      {hasResults && !expanded && (
+        <button className="search-collapsed-bar" onClick={() => setExpanded(true)}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <polyline points="6 15 12 9 18 15" />
           </svg>
           <span>{results.length} results — {title}</span>
         </button>
       )}
 
-      {/* Search Bar */}
+      {/* Search Bar (always at bottom) */}
       <form className="site-search-bar" onSubmit={handleSubmit}>
         <div className="site-search-icon">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -252,7 +263,7 @@ export function SiteSearch({
   );
 }
 
-/* ── Result Card ───────────────────────────────────────────────────────── */
+/* ── Result Row Item ──────────────────────────────────────────────────── */
 
 const TABLE_LABELS: Record<string, string> = {
   sold_properties: 'Sale',
@@ -293,20 +304,18 @@ function formatArea(sqm: number): string {
   return `${Math.round(sqm).toLocaleString()} m²`;
 }
 
-function getResultMetrics(r: SiteSearchResult): { label: string; value: string }[] {
-  const metrics: { label: string; value: string }[] = [];
-  if (r.sale_price) metrics.push({ label: 'Price', value: `€${Number(r.sale_price).toLocaleString()}` });
-  if (r.area_sqm) metrics.push({ label: 'Area', value: formatArea(Number(r.area_sqm)) });
-  if (r.site_area) metrics.push({ label: 'Area', value: formatArea(Number(r.site_area)) });
-  if (r.area_acres) metrics.push({ label: 'Acres', value: `${r.area_acres} ac` });
-  if (r.price_per_sqm) metrics.push({ label: '€/m²', value: `€${Number(r.price_per_sqm).toLocaleString()}` });
-  if (r.total_population) metrics.push({ label: 'Pop', value: Number(r.total_population).toLocaleString() });
-  if (r.vacancy_rate != null) metrics.push({ label: 'Vacancy', value: `${r.vacancy_rate}%` });
-  if (r.descrptn && metrics.length === 0) metrics.push({ label: 'Type', value: String(r.descrptn).slice(0, 25) });
-  return metrics.slice(0, 3);
+function getMetricChips(r: SiteSearchResult): { label: string; value: string }[] {
+  const m: { label: string; value: string }[] = [];
+  if (r.sale_price) m.push({ label: 'Price', value: `€${Number(r.sale_price).toLocaleString()}` });
+  if (r.area_sqm) m.push({ label: 'Area', value: formatArea(Number(r.area_sqm)) });
+  if (r.site_area) m.push({ label: 'Area', value: formatArea(Number(r.site_area)) });
+  if (r.price_per_sqm) m.push({ label: '€/m²', value: `€${Number(r.price_per_sqm).toLocaleString()}` });
+  if (r.total_population) m.push({ label: 'Pop', value: Number(r.total_population).toLocaleString() });
+  if (r.vacancy_rate != null) m.push({ label: 'Vacancy', value: `${r.vacancy_rate}%` });
+  return m.slice(0, 3);
 }
 
-function ResultCard({ result, index, isSelected, onClick }: {
+function SearchResultItem({ result, index, isSelected, onClick }: {
   result: SiteSearchResult;
   index: number;
   isSelected: boolean;
@@ -319,54 +328,48 @@ function ResultCard({ result, index, isSelected, onClick }: {
   const tagLabel = TABLE_LABELS[table] || table;
   const tagColor = TABLE_COLORS[table] || '#6b7394';
   const title = getResultTitle(result);
-  const metrics = getResultMetrics(result);
+  const metrics = getMetricChips(result);
 
   return (
     <div
-      className={`result-card ${isSelected ? 'selected' : ''}`}
+      className={`search-result-item ${isSelected ? 'selected' : ''}`}
       onClick={onClick}
       role="button"
       tabIndex={0}
       onKeyDown={e => e.key === 'Enter' && onClick()}
     >
-      {/* Score bar */}
-      <div className="result-card-score-bar">
-        <div className="result-card-score-fill" style={{ width: `${score}%`, backgroundColor: scoreColor }} />
+      {/* Rank circle */}
+      <div className="sri-rank" style={{ borderColor: scoreColor, color: scoreColor }}>
+        {index + 1}
       </div>
 
-      <div className="result-card-content">
-        {/* Rank + Tag row */}
-        <div className="result-card-top">
-          <span className="result-card-rank" style={{ borderColor: scoreColor, color: scoreColor }}>
-            {index + 1}
-          </span>
-          <span className="result-card-tag" style={{ color: tagColor, borderColor: tagColor }}>
-            {tagLabel}
-          </span>
-          <span className="result-card-score" style={{ color: scoreColor }}>
-            {score}
-          </span>
+      {/* Main content */}
+      <div className="sri-body">
+        <div className="sri-top-row">
+          <span className="sri-title">{title}</span>
+          <span className="sri-tag" style={{ color: tagColor, borderColor: tagColor }}>{tagLabel}</span>
         </div>
 
-        {/* Title */}
-        <div className="result-card-title">{title}</div>
-
-        {/* Metrics */}
+        {/* Metrics row */}
         {metrics.length > 0 && (
-          <div className="result-card-metrics">
+          <div className="sri-metrics">
             {metrics.map((m, i) => (
-              <div key={i} className="result-card-metric">
-                <span className="result-card-metric-value">{m.value}</span>
-                <span className="result-card-metric-label">{m.label}</span>
-              </div>
+              <span key={i} className="sri-metric">
+                <strong>{m.value}</strong> {m.label}
+              </span>
             ))}
           </div>
         )}
 
-        {/* Opportunity reason */}
+        {/* Reason */}
         {result.opportunity_reason && (
-          <div className="result-card-reason">{result.opportunity_reason}</div>
+          <div className="sri-reason">{result.opportunity_reason}</div>
         )}
+      </div>
+
+      {/* Score */}
+      <div className="sri-score" style={{ color: scoreColor }}>
+        {score}
       </div>
     </div>
   );
