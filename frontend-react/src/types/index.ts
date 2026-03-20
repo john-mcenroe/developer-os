@@ -71,9 +71,24 @@ export interface SoldPropertyProperties {
   price_per_sqm?: number;
 }
 
+export interface CountyBenchmarks {
+  population_density?: number;
+  apartment_pct?: number;
+  owner_occupied_pct?: number;
+  rented_pct?: number;
+  vacancy_rate?: number;
+  employment_rate?: number;
+  third_level_pct?: number;
+  wfh_pct?: number;
+  avg_household_size?: number;
+  avg_rooms?: number;
+  health_good_pct?: number;
+}
+
 export interface CensusProperties {
   id: number;
   sa_code?: string;
+  small_area_id?: string;
   urban_area?: string;
   county?: string;
   total_population?: number;
@@ -90,8 +105,18 @@ export interface CensusProperties {
   avg_rooms?: number;
   health_good_pct?: number;
   built_pre_1919?: number;
+  built_1919_1945?: number;
+  built_1946_1970?: number;
+  built_1971_2000?: number;
+  built_2001_2015?: number;
   built_2016_plus?: number;
+  age_0_14?: number;
+  age_15_24?: number;
+  age_25_44?: number;
+  age_45_64?: number;
+  age_65_plus?: number;
   area_sqm?: number;
+  county_benchmarks?: CountyBenchmarks;
 }
 
 export interface SideSiteProperties {
