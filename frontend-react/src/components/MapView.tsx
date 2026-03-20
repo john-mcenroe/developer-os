@@ -412,10 +412,11 @@ export function MapView() {
             id="dlr_planning_points-fill"
             type="circle"
             paint={{
-              'circle-radius': 5,
+              'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 2, 15, 3.5, 18, 5],
               'circle-color': '#27ae60',
-              'circle-stroke-color': '#1e8449',
-              'circle-stroke-width': 1,
+              'circle-stroke-color': 'rgba(255,255,255,0.5)',
+              'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 12, 0, 15, 0.5],
+              'circle-opacity': ['interpolate', ['linear'], ['zoom'], 12, 0.5, 15, 0.7, 18, 0.85],
             }}
           />
         </Source>
@@ -426,7 +427,7 @@ export function MapView() {
             id="sold_properties-fill"
             type="circle"
             paint={{
-              'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 3, 16, 6, 18, 9],
+              'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 2, 14, 3, 16, 4.5, 18, 6],
               'circle-color': [
                 'interpolate', ['linear'], ['coalesce', ['get', 'sale_price'], 0],
                 100000, '#f1c40f',
@@ -435,9 +436,9 @@ export function MapView() {
                 1000000, '#8e44ad',
                 3000000, '#2c3e50',
               ],
-              'circle-stroke-color': '#fff',
-              'circle-stroke-width': 0.5,
-              'circle-opacity': 0.85,
+              'circle-stroke-color': 'rgba(255,255,255,0.6)',
+              'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 12, 0, 15, 0.5, 18, 1],
+              'circle-opacity': ['interpolate', ['linear'], ['zoom'], 12, 0.5, 15, 0.65, 18, 0.8],
             }}
           />
         </Source>
