@@ -530,7 +530,11 @@ function EnrichedParcelDetail({ data }: { data: EnrichedParcel }) {
       })()}
 
       {/* Demographics */}
-      {data.census && <CensusCard census={data.census} />}
+      {data.census && (
+        <Card title="Demographics" subtitle="Census 2022" accent="#00bcd4">
+          <CensusCard census={data.census} />
+        </Card>
+      )}
     </div>
   );
 }
@@ -563,25 +567,127 @@ function ParcelDetail({ props }: { props: Record<string, unknown> }) {
   );
 }
 
-/* ── Census Card ───────────────────────────────────────────────────────── */
+/* ── Demographics Components ───────────────────────────────────────────── */
+
+function BenchmarkBar({ value, benchmark, label, countyLabel, suffix, color, invertColor }: {
+  value: number | null | undefined;
+  benchmark: number | null | undefined;
+  label: string;
+  countyLabel?: string;
+  suffix?: string;
+  color?: string;
+  invertColor?: boolean;
+}) {
+  if (value == null) return null;
+  const s = suffix || '%';
+  const maxVal = Math.max(value, benchmark || 0, 1);
+  const valuePct = Math.min((value / maxVal) * 100, 100);
+  const benchPct = benchmark != null ? Math.min((benchmark / maxVal) * 100, 100) : null;
+  const delta = benchmark != null ? value - benchmark : null;
+  const deltaColor = delta != null
+    ? (invertColor ? (delta > 0 ? '#ef4444' : '#22c55e') : (delta > 0 ? '#22c55e' : '#ef4444'))
+    : undefined;
+  const barColor = color || '#00bcd4';
+
+  return (
+    <div className="benchmark-row">
+      <div className="benchmark-header">
+        <span className="benchmark-label">{label}</span>
+        <span className="benchmark-values">
+          <span className="benchmark-value" style={{ color: barColor }}>{typeof value === 'number' && value % 1 !== 0 ? value.toFixed(1) : value}{s}</span>
+          {delta != null && <span className="benchmark-delta" style={{ color: deltaColor }}>{delta > 0 ? '+' : ''}{delta.toFixed(1)}</span>}
+        </span>
+      </div>
+      <div className="benchmark-track">
+        <div className="benchmark-fill" style={{ width: `${valuePct}%`, background: barColor }} />
+        {benchPct != null && (
+          <div className="benchmark-marker" style={{ left: `${benchPct}%` }} title={`${countyLabel || 'County'} avg: ${typeof benchmark === 'number' && benchmark % 1 !== 0 ? benchmark.toFixed(1) : benchmark}${s}`} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function HorizontalBarChart({ items, color }: {
+  items: { label: string; value: number }[];
+  color?: string;
+}) {
+  const maxVal = Math.max(...items.map(i => i.value), 1);
+  const total = items.reduce((a, b) => a + b.value, 0);
+
+  return (
+    <div className="hbar-chart">
+      {items.map((item) => {
+        const pct = total > 0 ? ((item.value / total) * 100).toFixed(0) : '0';
+        return (
+          <div key={item.label} className="hbar-row">
+            <span className="hbar-label">{item.label}</span>
+            <div className="hbar-track">
+              <div
+                className="hbar-fill"
+                style={{ width: `${(item.value / maxVal) * 100}%`, background: color || '#00bcd4' }}
+              />
+            </div>
+            <span className="hbar-value">{pct}%</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DemographicsSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="demo-section">
+      <div className="demo-section-title">{title}</div>
+      {children}
+    </div>
+  );
+}
 
 function CensusCard({ census }: { census: CensusProperties }) {
   const c = census;
+  const bench = c.county_benchmarks;
+  const countyLabel = c.county || 'County';
+
+  // Tenure
   const ownerPct = c.owner_occupied_pct || 0;
   const rentPct = c.rented_pct || 0;
   const otherPct = Math.max(0, 100 - ownerPct - rentPct);
   const vacColor = (c.vacancy_rate || 0) > 10 ? '#e74c3c' : (c.vacancy_rate || 0) > 5 ? '#f59e0b' : '#22c55e';
 
+  // Age profile
+  const hasAge = c.age_0_14 != null || c.age_25_44 != null;
+  const ageItems = hasAge ? [
+    { label: '0–14', value: c.age_0_14 || 0 },
+    { label: '15–24', value: c.age_15_24 || 0 },
+    { label: '25–44', value: c.age_25_44 || 0 },
+    { label: '45–64', value: c.age_45_64 || 0 },
+    { label: '65+', value: c.age_65_plus || 0 },
+  ] : [];
+
+  // Housing age
+  const hasHousingAge = c.built_pre_1919 != null || c.built_1971_2000 != null;
+  const housingAgeItems = hasHousingAge ? [
+    { label: 'Pre-1919', value: c.built_pre_1919 || 0 },
+    { label: '1919–45', value: c.built_1919_1945 || 0 },
+    { label: '1946–70', value: c.built_1946_1970 || 0 },
+    { label: '1971–00', value: c.built_1971_2000 || 0 },
+    { label: '2001–15', value: c.built_2001_2015 || 0 },
+    { label: '2016+', value: c.built_2016_plus || 0 },
+  ] : [];
+
   return (
-    <Card title="Demographics" subtitle="Census 2022" accent="#00bcd4">
+    <div className="demographics-card">
+      {/* Hero stats */}
       <div className="demo-grid">
         <div className="demo-stat">
           <span className="demo-stat-value" style={{ color: '#00bcd4' }}>{c.total_population?.toLocaleString() || '—'}</span>
           <span className="demo-stat-label">Population</span>
         </div>
         <div className="demo-stat">
-          <span className="demo-stat-value">{c.population_density ? `${Math.round(c.population_density).toLocaleString()}` : '—'}</span>
-          <span className="demo-stat-label">Per km²</span>
+          <span className="demo-stat-value">{c.total_households?.toLocaleString() || '—'}</span>
+          <span className="demo-stat-label">Households</span>
         </div>
         <div className="demo-stat">
           <span className="demo-stat-value" style={{ color: vacColor }}>{c.vacancy_rate != null ? `${c.vacancy_rate}%` : '—'}</span>
@@ -589,27 +695,55 @@ function CensusCard({ census }: { census: CensusProperties }) {
         </div>
       </div>
 
-      <div className="tenure-section">
-        <div className="tenure-label">Housing Tenure</div>
-        <div className="tenure-bar">
-          <div className="tenure-segment owner" style={{ width: `${ownerPct}%` }} />
-          <div className="tenure-segment rented" style={{ width: `${rentPct}%` }} />
-          <div className="tenure-segment other" style={{ width: `${otherPct}%` }} />
+      {bench && (
+        <div className="benchmark-county-label">
+          vs {countyLabel} average <span className="benchmark-marker-inline" /> = county avg
         </div>
-        <div className="tenure-legend">
-          <span><span className="legend-dot owner" />Owner {ownerPct}%</span>
-          <span><span className="legend-dot rented" />Rented {rentPct}%</span>
-          {otherPct > 0 && <span><span className="legend-dot other" />Other {Math.round(otherPct)}%</span>}
-        </div>
-      </div>
+      )}
 
-      <div className="demo-metrics">
-        <Row label="Employment" value={c.employment_rate != null ? `${c.employment_rate}%` : '—'} />
-        <Row label="3rd Level Edu" value={c.third_level_pct != null ? `${c.third_level_pct}%` : '—'} />
-        {c.wfh_pct != null && c.wfh_pct > 0 && <Row label="WFH" value={`${c.wfh_pct}%`} />}
-        {c.avg_household_size != null && <Row label="Avg Household" value={`${c.avg_household_size} people`} />}
-      </div>
-    </Card>
+      {/* Housing & Tenure */}
+      <DemographicsSection title="Housing & Tenure">
+        <div className="tenure-section">
+          <div className="tenure-bar">
+            <div className="tenure-segment owner" style={{ width: `${ownerPct}%` }} />
+            <div className="tenure-segment rented" style={{ width: `${rentPct}%` }} />
+            <div className="tenure-segment other" style={{ width: `${otherPct}%` }} />
+          </div>
+          <div className="tenure-legend">
+            <span><span className="legend-dot owner" />Owner {ownerPct.toFixed(0)}%</span>
+            <span><span className="legend-dot rented" />Rented {rentPct.toFixed(0)}%</span>
+            {otherPct > 1 && <span><span className="legend-dot other" />Other {otherPct.toFixed(0)}%</span>}
+          </div>
+        </div>
+        <BenchmarkBar label="Apartments" value={c.apartment_pct} benchmark={bench?.apartment_pct} countyLabel={countyLabel} color="#8b5cf6" />
+        <BenchmarkBar label="Avg Rooms" value={c.avg_rooms} benchmark={bench?.avg_rooms} countyLabel={countyLabel} suffix="" color="#6366f1" />
+        <BenchmarkBar label="Avg Household" value={c.avg_household_size} benchmark={bench?.avg_household_size} countyLabel={countyLabel} suffix="" color="#06b6d4" />
+        <BenchmarkBar label="Vacancy" value={c.vacancy_rate} benchmark={bench?.vacancy_rate} countyLabel={countyLabel} color={vacColor} invertColor />
+      </DemographicsSection>
+
+      {/* Socioeconomic */}
+      <DemographicsSection title="Socioeconomic">
+        <BenchmarkBar label="Employment" value={c.employment_rate} benchmark={bench?.employment_rate} countyLabel={countyLabel} color="#22c55e" />
+        <BenchmarkBar label="3rd Level Edu" value={c.third_level_pct} benchmark={bench?.third_level_pct} countyLabel={countyLabel} color="#3b82f6" />
+        <BenchmarkBar label="Work From Home" value={c.wfh_pct} benchmark={bench?.wfh_pct} countyLabel={countyLabel} color="#f59e0b" />
+        <BenchmarkBar label="Good Health" value={c.health_good_pct} benchmark={bench?.health_good_pct} countyLabel={countyLabel} color="#10b981" />
+        <BenchmarkBar label="Density" value={c.population_density ? Math.round(c.population_density) : null} benchmark={bench?.population_density ? Math.round(bench.population_density) : null} countyLabel={countyLabel} suffix="/km²" color="#00bcd4" />
+      </DemographicsSection>
+
+      {/* Age Profile */}
+      {hasAge && ageItems.some(i => i.value > 0) && (
+        <DemographicsSection title="Age Profile">
+          <HorizontalBarChart items={ageItems} color="#00bcd4" />
+        </DemographicsSection>
+      )}
+
+      {/* Housing Stock Age */}
+      {hasHousingAge && housingAgeItems.some(i => i.value > 0) && (
+        <DemographicsSection title="Housing Stock Age">
+          <HorizontalBarChart items={housingAgeItems} color="#8b5cf6" />
+        </DemographicsSection>
+      )}
+    </div>
   );
 }
 
@@ -721,9 +855,12 @@ function CensusDetail({ props }: { props: CensusProperties }) {
         <div className="hero-tags">
           {props.sa_code && <Tag text={props.sa_code} color="#00bcd4" />}
           {props.county && <Tag text={props.county} color="#6b7394" />}
+          {props.urban_area && <Tag text={props.urban_area} color="#6b7394" />}
         </div>
       </div>
-      <CensusCard census={props} />
+      <Card title="Demographics" subtitle="Census 2022" accent="#00bcd4">
+        <CensusCard census={props} />
+      </Card>
     </div>
   );
 }

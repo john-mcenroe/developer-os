@@ -163,3 +163,7 @@ Property developers — people looking for sites to develop, researching sites t
 - AI model is Gemini 2.0 Flash with forced JSON output via `responseMimeType`
 - Chat persistence is localStorage (no backend auth needed yet)
 - See `landos-plan.md` for original schema design and spatial operations reference
+
+## Feature Tracking
+
+All planned features are tracked in [`FEATURES.md`](FEATURES.md). **When implementing a new feature, update FEATURES.md** — mark items in progress `[~]` or done `[x]`, and add any new features that come up during development.

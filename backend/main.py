@@ -949,19 +949,36 @@ def get_parcel_enriched(parcel_id: int, parcel_type: str = Query("freehold")):
                 for r in cur.fetchall()
             ]
 
-            # 5) Census — small area containing this parcel centroid
+            # 5) Census — small area containing this parcel centroid + county benchmarks
             cur.execute(
                 """
                 SELECT
                     sa_pub2022,
+                    county_english,
                     total_population,
                     population_density,
+                    total_households,
+                    avg_household_size,
+                    apartment_pct,
                     owner_occupied_pct,
                     rented_pct,
                     vacancy_rate,
                     employment_rate,
                     third_level_pct,
-                    avg_household_size
+                    wfh_pct,
+                    avg_rooms,
+                    health_good_pct,
+                    age_0_14,
+                    age_15_24,
+                    age_25_44,
+                    age_45_64,
+                    age_65_plus,
+                    built_pre_1919,
+                    built_1919_1945,
+                    built_1946_1970,
+                    built_1971_2000,
+                    built_2001_2015,
+                    built_2016_plus
                 FROM census_small_areas
                 WHERE ST_Intersects(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
                 AND total_population IS NOT NULL
@@ -972,17 +989,76 @@ def get_parcel_enriched(parcel_id: int, parcel_type: str = Query("freehold")):
             census_row = cur.fetchone()
             census = None
             if census_row:
+                _f = lambda v: float(v) if v is not None else None
+                _i = lambda v: int(v) if v is not None else None
+                county_name = census_row[1]
                 census = {
                     "small_area_id": census_row[0],
-                    "total_population": census_row[1],
-                    "population_density": float(census_row[2]) if census_row[2] else None,
-                    "owner_occupied_pct": float(census_row[3]) if census_row[3] else None,
-                    "rented_pct": float(census_row[4]) if census_row[4] else None,
-                    "vacancy_rate": float(census_row[5]) if census_row[5] else None,
-                    "employment_rate": float(census_row[6]) if census_row[6] else None,
-                    "third_level_pct": float(census_row[7]) if census_row[7] else None,
-                    "avg_household_size": float(census_row[8]) if census_row[8] else None,
+                    "county": county_name,
+                    "total_population": _i(census_row[2]),
+                    "population_density": _f(census_row[3]),
+                    "total_households": _i(census_row[4]),
+                    "avg_household_size": _f(census_row[5]),
+                    "apartment_pct": _f(census_row[6]),
+                    "owner_occupied_pct": _f(census_row[7]),
+                    "rented_pct": _f(census_row[8]),
+                    "vacancy_rate": _f(census_row[9]),
+                    "employment_rate": _f(census_row[10]),
+                    "third_level_pct": _f(census_row[11]),
+                    "wfh_pct": _f(census_row[12]),
+                    "avg_rooms": _f(census_row[13]),
+                    "health_good_pct": _f(census_row[14]),
+                    "age_0_14": _i(census_row[15]),
+                    "age_15_24": _i(census_row[16]),
+                    "age_25_44": _i(census_row[17]),
+                    "age_45_64": _i(census_row[18]),
+                    "age_65_plus": _i(census_row[19]),
+                    "built_pre_1919": _i(census_row[20]),
+                    "built_1919_1945": _i(census_row[21]),
+                    "built_1946_1970": _i(census_row[22]),
+                    "built_1971_2000": _i(census_row[23]),
+                    "built_2001_2015": _i(census_row[24]),
+                    "built_2016_plus": _i(census_row[25]),
                 }
+
+                # County-level benchmarks for comparison
+                if county_name:
+                    cur.execute(
+                        """
+                        SELECT
+                            ROUND(AVG(population_density)::numeric, 0),
+                            ROUND(AVG(apartment_pct)::numeric, 1),
+                            ROUND(AVG(owner_occupied_pct)::numeric, 1),
+                            ROUND(AVG(rented_pct)::numeric, 1),
+                            ROUND(AVG(vacancy_rate)::numeric, 1),
+                            ROUND(AVG(employment_rate)::numeric, 1),
+                            ROUND(AVG(third_level_pct)::numeric, 1),
+                            ROUND(AVG(wfh_pct)::numeric, 1),
+                            ROUND(AVG(avg_household_size)::numeric, 2),
+                            ROUND(AVG(avg_rooms)::numeric, 1),
+                            ROUND(AVG(health_good_pct)::numeric, 1)
+                        FROM census_small_areas
+                        WHERE county_english = %s
+                          AND total_population IS NOT NULL
+                          AND total_population > 0
+                        """,
+                        (county_name,),
+                    )
+                    bench_row = cur.fetchone()
+                    if bench_row:
+                        census["county_benchmarks"] = {
+                            "population_density": _f(bench_row[0]),
+                            "apartment_pct": _f(bench_row[1]),
+                            "owner_occupied_pct": _f(bench_row[2]),
+                            "rented_pct": _f(bench_row[3]),
+                            "vacancy_rate": _f(bench_row[4]),
+                            "employment_rate": _f(bench_row[5]),
+                            "third_level_pct": _f(bench_row[6]),
+                            "wfh_pct": _f(bench_row[7]),
+                            "avg_household_size": _f(bench_row[8]),
+                            "avg_rooms": _f(bench_row[9]),
+                            "health_good_pct": _f(bench_row[10]),
+                        }
 
     finally:
         put_conn(conn)
