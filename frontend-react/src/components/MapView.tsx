@@ -90,6 +90,7 @@ export function MapView() {
     side_sites: 'side_site',
   };
 
+  const siteSearchFn = siteSearch.search;
   const handleSiteSearch = useCallback((query: string) => {
     const map = mapRef.current?.getMap();
     let viewport: { sw: [number, number]; ne: [number, number] } | undefined;
@@ -101,8 +102,8 @@ export function MapView() {
       };
     }
     setSearchSelectedIndex(null);
-    siteSearch.search(query, viewport, viewState.zoom, Array.from(visibleLayers));
-  }, [siteSearch, viewState.zoom, visibleLayers]);
+    siteSearchFn(query, viewport, viewState.zoom, Array.from(visibleLayers));
+  }, [siteSearchFn, viewState.zoom, visibleLayers]);
 
   const handleSearchResultSelect = useCallback((result: SiteSearchResult, index: number) => {
     setSearchSelectedIndex(index);
@@ -128,19 +129,45 @@ export function MapView() {
     }
   }, [fetchEnriched, clearEnriched]);
 
+  const siteSearchClear = siteSearch.clear;
   const handleSearchClear = useCallback(() => {
-    siteSearch.clear();
+    siteSearchClear();
     setSearchSelectedIndex(null);
-  }, [siteSearch]);
+  }, [siteSearchClear]);
 
-  // Build GeoJSON for search results markers
+  // Build GeoJSON for search result markers (points for numbered pins)
   const searchResultsGeoJSON: GeoJSON.FeatureCollection = {
     type: 'FeatureCollection',
     features: siteSearch.results.map((r, i) => ({
       type: 'Feature' as const,
-      geometry: r.geometry || { type: 'Point' as const, coordinates: [r.lng, r.lat] },
+      geometry: { type: 'Point' as const, coordinates: [r.lng, r.lat] },
       properties: { rank: i + 1, score: r._score, selected: searchSelectedIndex === i ? 1 : 0 },
     })),
+  };
+
+  // Build GeoJSON for the SELECTED result's actual geometry (polygon highlight)
+  const selectedResultGeoJSON: GeoJSON.FeatureCollection = {
+    type: 'FeatureCollection',
+    features: searchSelectedIndex != null && siteSearch.results[searchSelectedIndex]?.geometry
+      ? [{
+          type: 'Feature' as const,
+          geometry: siteSearch.results[searchSelectedIndex].geometry!,
+          properties: { rank: searchSelectedIndex + 1 },
+        }]
+      : [],
+  };
+
+  // Build GeoJSON for ALL unselected results that have polygon geometries
+  const unselectedResultsGeoJSON: GeoJSON.FeatureCollection = {
+    type: 'FeatureCollection',
+    features: siteSearch.results
+      .map((r, i) => ({ r, i }))
+      .filter(({ r, i }) => i !== searchSelectedIndex && r.geometry && r.geometry.type !== 'Point')
+      .map(({ r, i }) => ({
+        type: 'Feature' as const,
+        geometry: r.geometry!,
+        properties: { rank: i + 1 },
+      })),
   };
 
   const { scheduleLoad, loadAllLayers } = useMapData(mapRef, visibleLayers, viewState.zoom);
@@ -324,13 +351,19 @@ export function MapView() {
             id="cadastral_freehold-selected"
             type="fill"
             filter={selFilter('cadastral-freehold')}
-            paint={{ 'fill-color': 'rgba(255, 200, 0, 0.45)', 'fill-outline-color': '#ffc800' }}
+            paint={{ 'fill-color': 'rgba(255, 200, 0, 0.5)', 'fill-outline-color': '#ffc800' }}
           />
           <Layer
             id="cadastral_freehold-selected-outline"
             type="line"
             filter={selFilter('cadastral-freehold')}
-            paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+            paint={{ 'line-color': '#ffffff', 'line-width': 4 }}
+          />
+          <Layer
+            id="cadastral_freehold-selected-glow"
+            type="line"
+            filter={selFilter('cadastral-freehold')}
+            paint={{ 'line-color': '#ffc800', 'line-width': 10, 'line-opacity': 0.25, 'line-blur': 6 }}
           />
         </Source>
 
@@ -350,13 +383,19 @@ export function MapView() {
             id="cadastral_leasehold-selected"
             type="fill"
             filter={selFilter('cadastral-leasehold')}
-            paint={{ 'fill-color': 'rgba(100, 200, 255, 0.45)', 'fill-outline-color': '#64c8ff' }}
+            paint={{ 'fill-color': 'rgba(100, 200, 255, 0.5)', 'fill-outline-color': '#64c8ff' }}
           />
           <Layer
             id="cadastral_leasehold-selected-outline"
             type="line"
             filter={selFilter('cadastral-leasehold')}
-            paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+            paint={{ 'line-color': '#ffffff', 'line-width': 4 }}
+          />
+          <Layer
+            id="cadastral_leasehold-selected-glow"
+            type="line"
+            filter={selFilter('cadastral-leasehold')}
+            paint={{ 'line-color': '#64c8ff', 'line-width': 10, 'line-opacity': 0.25, 'line-blur': 6 }}
           />
         </Source>
 
@@ -402,7 +441,13 @@ export function MapView() {
             id="dlr_planning_polygons-selected-outline"
             type="line"
             filter={selFilter('dlr-planning-polygons')}
-            paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+            paint={{ 'line-color': '#ffffff', 'line-width': 4 }}
+          />
+          <Layer
+            id="dlr_planning_polygons-selected-glow"
+            type="line"
+            filter={selFilter('dlr-planning-polygons')}
+            paint={{ 'line-color': '#2ecc71', 'line-width': 10, 'line-opacity': 0.25, 'line-blur': 6 }}
           />
         </Source>
 
@@ -475,7 +520,13 @@ export function MapView() {
             id="census_small_areas-selected-outline"
             type="line"
             filter={selFilter('census-small-areas')}
-            paint={{ 'line-color': '#ffffff', 'line-width': 2.5 }}
+            paint={{ 'line-color': '#ffffff', 'line-width': 4 }}
+          />
+          <Layer
+            id="census_small_areas-selected-glow"
+            type="line"
+            filter={selFilter('census-small-areas')}
+            paint={{ 'line-color': '#00e5ff', 'line-width': 10, 'line-opacity': 0.25, 'line-blur': 6 }}
           />
         </Source>
 
@@ -565,36 +616,97 @@ export function MapView() {
           />
         </Source>
 
-        {/* === AI Search Results === */}
-        {siteSearch.results.length > 0 && (
-          <Source id="ai-search-results" type="geojson" data={searchResultsGeoJSON}>
-            <Layer
-              id="ai-results-circles"
-              type="circle"
-              paint={{
-                'circle-radius': ['case', ['==', ['get', 'selected'], 1], 14, 10],
-                'circle-color': ['case', ['==', ['get', 'selected'], 1], '#8b5cf6', '#3b82f6'],
-                'circle-stroke-width': 2,
-                'circle-stroke-color': '#ffffff',
-                'circle-opacity': 0.9,
-              }}
-            />
-            <Layer
-              id="ai-results-labels"
-              type="symbol"
-              layout={{
-                'text-field': ['to-string', ['get', 'rank']],
-                'text-size': 11,
-                'text-font': ['Open Sans Bold'],
-                'text-allow-overlap': true,
-                'text-ignore-placement': true,
-              }}
-              paint={{
-                'text-color': '#ffffff',
-              }}
-            />
-          </Source>
-        )}
+        {/* === AI Search Results: Unselected polygon outlines === */}
+        <Source id="ai-results-unselected-polys" type="geojson" data={unselectedResultsGeoJSON}>
+          <Layer
+            id="ai-unselected-fill"
+            type="fill"
+            paint={{
+              'fill-color': 'rgba(59, 130, 246, 0.08)',
+            }}
+          />
+          <Layer
+            id="ai-unselected-outline"
+            type="line"
+            paint={{
+              'line-color': '#3b82f6',
+              'line-width': 1.5,
+              'line-opacity': 0.4,
+            }}
+          />
+        </Source>
+
+        {/* === AI Search Results: SELECTED polygon highlight === */}
+        <Source id="ai-results-selected-poly" type="geojson" data={selectedResultGeoJSON}>
+          <Layer
+            id="ai-selected-fill"
+            type="fill"
+            paint={{
+              'fill-color': 'rgba(139, 92, 246, 0.25)',
+            }}
+          />
+          <Layer
+            id="ai-selected-outline"
+            type="line"
+            paint={{
+              'line-color': '#a78bfa',
+              'line-width': 4,
+              'line-opacity': 1,
+            }}
+          />
+          <Layer
+            id="ai-selected-outline-glow"
+            type="line"
+            paint={{
+              'line-color': '#8b5cf6',
+              'line-width': 10,
+              'line-opacity': 0.2,
+              'line-blur': 6,
+            }}
+          />
+        </Source>
+
+        {/* === AI Search Results: Numbered point markers === */}
+        <Source id="ai-search-results" type="geojson" data={searchResultsGeoJSON}>
+          <Layer
+            id="ai-results-circles"
+            type="circle"
+            paint={{
+              'circle-radius': ['case', ['==', ['get', 'selected'], 1], 16, 10],
+              'circle-color': ['case', ['==', ['get', 'selected'], 1], '#8b5cf6', '#3b82f6'],
+              'circle-stroke-width': ['case', ['==', ['get', 'selected'], 1], 3, 2],
+              'circle-stroke-color': '#ffffff',
+              'circle-opacity': ['case', ['==', ['get', 'selected'], 1], 1, 0.85],
+            }}
+          />
+          {/* Glow ring behind selected marker */}
+          <Layer
+            id="ai-results-selected-ring"
+            type="circle"
+            filter={['==', ['get', 'selected'], 1]}
+            paint={{
+              'circle-radius': 24,
+              'circle-color': 'transparent',
+              'circle-stroke-width': 3,
+              'circle-stroke-color': '#8b5cf6',
+              'circle-stroke-opacity': 0.4,
+            }}
+          />
+          <Layer
+            id="ai-results-labels"
+            type="symbol"
+            layout={{
+              'text-field': ['to-string', ['get', 'rank']],
+              'text-size': ['case', ['==', ['get', 'selected'], 1], 13, 11],
+              'text-font': ['Open Sans Bold'],
+              'text-allow-overlap': true,
+              'text-ignore-placement': true,
+            }}
+            paint={{
+              'text-color': '#ffffff',
+            }}
+          />
+        </Source>
       </MapGL>
 
       {/* Overlay controls */}
