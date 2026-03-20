@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { API_BASE } from '../config/layers';
-import type { SiteSearchResult, SiteSearchResponse, SearchPhase } from '../types';
+import type { SiteSearchResult, SiteSearchResponse, SearchPhase, PreviewFeature, AreaFocus } from '../types';
 
 export interface SiteSearchState {
   phase: SearchPhase;
@@ -13,6 +13,10 @@ export interface SiteSearchState {
   hypothesesCount: number;
   hypothesesNames: string[];
   queriesCompleted: number;
+  activeHypotheses: Set<number>;
+  completedHypotheses: Set<number>;
+  previewFeatures: PreviewFeature[];
+  areaFocus: AreaFocus | null;
 }
 
 const INITIAL_STATE: SiteSearchState = {
@@ -26,6 +30,10 @@ const INITIAL_STATE: SiteSearchState = {
   hypothesesCount: 0,
   hypothesesNames: [],
   queriesCompleted: 0,
+  activeHypotheses: new Set(),
+  completedHypotheses: new Set(),
+  previewFeatures: [],
+  areaFocus: null,
 };
 
 export function useSiteSearch() {
@@ -168,48 +176,89 @@ function processEvent(
   switch (event) {
     case 'status': {
       const phase = data.phase as string;
-      // More descriptive messages for the user
-      const descriptions: Record<string, string> = {
-        routing: 'Analyzing your query...',
-        hypotheses: 'Generating search strategies...',
-        executing: 'Querying spatial database...',
-        ranking: 'Scoring & ranking results...',
-        responding: 'Preparing response...',
-        querying: 'Running analysis...',
-      };
       setState(s => ({
         ...s,
         phase: (phase as SearchPhase) || s.phase,
-        phaseMessage: descriptions[phase] || (data.message as string) || s.phaseMessage,
+        phaseMessage: (data.message as string) || s.phaseMessage,
       }));
       break;
     }
+
+    case 'area_focus':
+      setState(s => ({
+        ...s,
+        areaFocus: {
+          area: data.area as string,
+          lat: data.lat as number,
+          lng: data.lng as number,
+          bbox: data.bbox as [string, string, string, string] | undefined,
+        },
+        phaseMessage: `Focusing on ${data.area}...`,
+      }));
+      break;
 
     case 'hypotheses':
       setState(s => ({
         ...s,
         hypothesesCount: (data.count as number) || 0,
         hypothesesNames: (data.names as string[]) || [],
-        phaseMessage: `Testing ${data.count} search strategies...`,
+        phaseMessage: `${data.count} hypotheses — testing in parallel...`,
       }));
       break;
 
-    case 'query_complete':
+    case 'hypothesis_start': {
+      const hIdx = data.hypothesis_index as number;
       setState(s => {
-        const completed = s.queriesCompleted + 1;
-        const total = s.hypothesesCount;
+        const active = new Set(s.activeHypotheses);
+        active.add(hIdx);
         return {
           ...s,
-          queriesCompleted: completed,
-          phaseMessage: `Querying database... (${completed}/${total} strategies tested)`,
+          activeHypotheses: active,
+          phaseMessage: `Testing: ${data.hypothesis_name as string}...`,
         };
       });
       break;
+    }
+
+    case 'query_complete': {
+      const rawFeatures = (data.preview_features as Array<GeoJSON.Geometry>) || [];
+      const hypIdx = (data.hypothesis_index as number) ?? 0;
+      const hypName = (data.hypothesis_name as string) || '';
+      const rowCount = (data.row_count as number) || 0;
+
+      // Tag each preview geometry with its hypothesis
+      const taggedFeatures: PreviewFeature[] = rawFeatures
+        .filter(g => g && g.type)
+        .map(geom => ({
+          geometry: geom,
+          hypothesisIndex: hypIdx,
+          hypothesisName: hypName,
+        }));
+
+      setState(s => {
+        const completed = new Set(s.completedHypotheses);
+        completed.add(hypIdx);
+        const active = new Set(s.activeHypotheses);
+        active.delete(hypIdx);
+        return {
+          ...s,
+          queriesCompleted: completed.size,
+          completedHypotheses: completed,
+          activeHypotheses: active,
+          previewFeatures: [...s.previewFeatures, ...taggedFeatures],
+          phaseMessage: hypName
+            ? `${hypName} — found ${rowCount} site${rowCount !== 1 ? 's' : ''}`
+            : `${completed.size}/${s.hypothesesCount} strategies complete`,
+        };
+      });
+      break;
+    }
 
     case 'tool_action':
       setState(s => ({
         ...s,
-        phaseMessage: `${data.action === 'sql_broaden' ? 'Broadening' : 'Testing'}: ${(data.hypothesis as string) || ''}`.slice(0, 60),
+        phaseMessage: (data.message as string)
+          || `${data.action === 'sql_broaden' ? 'Broadening' : 'Refining'}: ${(data.hypothesis as string) || ''}`.slice(0, 80),
       }));
       break;
 
@@ -225,6 +274,7 @@ function processEvent(
         phase: 'done',
         phaseMessage: '',
         results,
+        previewFeatures: [], // Clear ghost markers — real ones take over
         title: r.title || 'Results',
         summary: r.summary || '',
         followUps: r.follow_ups || [],
@@ -238,14 +288,14 @@ function processEvent(
         phase: 'error',
         error: (data.message as string) || 'Unknown error',
         phaseMessage: '',
+        previewFeatures: [],
       }));
       break;
 
     case 'done':
       setState(s => {
         if (s.phase !== 'done' && s.phase !== 'error') {
-          // If we got done but never got result, that's fine for non-site_search intents
-          return { ...s, phase: s.results.length > 0 ? 'done' : 'error', error: s.results.length > 0 ? null : 'No results found — try a more specific query' };
+          return { ...s, phase: s.results.length > 0 ? 'done' : 'error', error: s.results.length > 0 ? null : 'No results found — try a more specific query', previewFeatures: [] };
         }
         return s;
       });

@@ -2672,6 +2672,30 @@ async def ai_chat(req: ChatRequest):
     }
 
 
+def _simplify_geom(geom: dict, max_points: int = 30) -> dict:
+    """Simplify a GeoJSON geometry for SSE preview payloads."""
+    if geom["type"] == "Polygon":
+        ring = geom["coordinates"][0]
+        if len(ring) > max_points:
+            step = max(1, len(ring) // max_points)
+            ring = [ring[i] for i in range(0, len(ring), step)]
+            if ring[-1] != geom["coordinates"][0][-1]:
+                ring.append(geom["coordinates"][0][-1])
+        return {"type": "Polygon", "coordinates": [ring]}
+    elif geom["type"] == "MultiPolygon":
+        simplified = []
+        for poly in geom["coordinates"]:
+            ring = poly[0]
+            if len(ring) > max_points:
+                step = max(1, len(ring) // max_points)
+                ring = [ring[i] for i in range(0, len(ring), step)]
+                if ring[-1] != poly[0][-1]:
+                    ring.append(poly[0][-1])
+            simplified.append([ring])
+        return {"type": "MultiPolygon", "coordinates": simplified}
+    return geom
+
+
 @app.post("/api/ai/chat/stream")
 async def ai_chat_stream(req: ChatRequest):
     """SSE streaming version of the AI chat endpoint.
@@ -2755,7 +2779,38 @@ async def ai_chat_stream(req: ChatRequest):
             return
 
         # Explore pipeline
-        yield sse("status", {"phase": "hypotheses", "message": "Forming spatial hypotheses..."})
+        # Detect area early for map fly-to
+        detected_area = extract_area_from_query(user_query)
+        if detected_area:
+            # Geocode the area to get coordinates for map fly-to
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    geo_resp = await client.get(
+                        "https://nominatim.openstreetmap.org/search",
+                        params={
+                            "q": f"{detected_area}, Dublin, Ireland",
+                            "format": "json",
+                            "limit": 1,
+                            "countrycodes": "ie",
+                        },
+                        headers={"User-Agent": "LandOS/1.0"},
+                    )
+                    if geo_resp.status_code == 200 and geo_resp.json():
+                        geo = geo_resp.json()[0]
+                        yield sse("area_focus", {
+                            "area": detected_area,
+                            "lat": float(geo["lat"]),
+                            "lng": float(geo["lon"]),
+                            "bbox": geo.get("boundingbox"),
+                        })
+            except Exception:
+                # Non-critical — skip fly-to if geocoding fails
+                pass
+
+        yield sse("status", {
+            "phase": "hypotheses",
+            "message": f"Forming hypotheses{f' for {detected_area}' if detected_area else ''}...",
+        })
         try:
             hypotheses = await generate_hypotheses(req.messages, req.map_context, conv_ctx)
         except Exception as e:
@@ -2767,13 +2822,32 @@ async def ai_chat_stream(req: ChatRequest):
             "names": [h.get("name", "") for h in hypotheses],
         })
 
-        # Phase 2: Execute SQL with agentic retry loop
-        yield sse("status", {"phase": "executing", "message": "Testing hypotheses against the database..."})
+        # Phase 2: Execute hypotheses in parallel
+        import asyncio
+
+        h_names = [h.get("name", f"Strategy {i+1}") for i, h in enumerate(hypotheses)]
+        yield sse("status", {
+            "phase": "executing",
+            "message": f"Testing {len(hypotheses)} hypotheses in parallel...",
+        })
         total_queries = 0
         successful_queries = 0
         MAX_SQL_RETRIES = 2
 
-        for h_idx, hypothesis in enumerate(hypotheses):
+        # Queue collects SSE events from parallel hypothesis workers
+        event_queue: asyncio.Queue = asyncio.Queue()
+
+        async def run_hypothesis(h_idx: int, hypothesis: dict):
+            """Execute a single hypothesis's queries (with retries) and push events to queue."""
+            nonlocal total_queries, successful_queries
+            h_name = hypothesis.get("name", f"Strategy {h_idx + 1}")
+
+            # Signal that this hypothesis is starting
+            await event_queue.put(("hypothesis_start", {
+                "hypothesis_index": h_idx,
+                "hypothesis_name": h_name,
+            }))
+
             for q_idx, query in enumerate(hypothesis.get("sql_queries", [])):
                 sql = query.get("sql", "")
                 query_plan = query.get("query_plan")
@@ -2783,61 +2857,108 @@ async def ai_chat_stream(req: ChatRequest):
                 if not sql.strip():
                     continue
 
-                # Agentic retry loop
+                # Run SQL in thread pool to avoid blocking
                 result = None
                 for attempt in range(MAX_SQL_RETRIES + 1):
-                    result = execute_hypothesis_sql(sql)
+                    result = await asyncio.to_thread(execute_hypothesis_sql, sql)
                     total_queries += 1
 
-                    # Case 1: SQL error — ask Gemini to fix it
+                    # Case 1: SQL error — ask Gemini to fix
                     if result.get("error") and attempt < MAX_SQL_RETRIES:
-                        yield sse("tool_action", {
+                        await event_queue.put(("tool_action", {
                             "action": "sql_retry",
                             "attempt": attempt + 1,
                             "error": result["error"][:200],
-                            "hypothesis": hypothesis.get("name", ""),
-                        })
+                            "hypothesis": h_name,
+                        }))
                         try:
                             fix = await retry_failed_sql(sql, result["error"])
                             new_sql = fix.get("corrected_sql", "")
                             if new_sql.strip():
                                 sql = new_sql
-                                continue  # retry with corrected SQL
+                                continue
                         except Exception:
                             pass
-                        break  # couldn't get a fix from Gemini
+                        break
 
-                    # Case 2: Empty results — ask Gemini to broaden
+                    # Case 2: Empty results — broaden
                     elif result["row_count"] == 0 and not result.get("error") and attempt == 0:
-                        yield sse("tool_action", {
+                        await event_queue.put(("tool_action", {
                             "action": "sql_broaden",
-                            "hypothesis": hypothesis.get("name", ""),
+                            "hypothesis": h_name,
                             "description": query.get("description", ""),
-                        })
+                            "message": f"No matches for {h_name} — broadening...",
+                        }))
                         try:
                             broader = await broaden_empty_sql(sql, query.get("description", ""))
                             new_sql = broader.get("corrected_sql", "")
                             if new_sql.strip():
                                 sql = new_sql
-                                continue  # retry with broadened SQL
+                                continue
                         except Exception:
                             pass
-                        break  # couldn't broaden
+                        break
 
-                    # Case 3: Success or exhausted retries
                     else:
                         break
 
                 query["result"] = result
                 if result and not result.get("error"):
                     successful_queries += 1
-                    yield sse("query_complete", {
+
+                    # Extract preview features (full geometry) for map highlighting
+                    preview_features = []
+                    for row in result.get("rows", [])[:25]:
+                        geom = row.get("geometry")
+                        if isinstance(geom, dict) and geom.get("type") in ("Polygon", "MultiPolygon"):
+                            # Simplify large polygons for SSE payload size
+                            simplified = _simplify_geom(geom)
+                            preview_features.append(simplified)
+                        elif isinstance(geom, dict) and geom.get("type") == "Point":
+                            # Create a small buffer circle for points (visual area)
+                            preview_features.append(geom)
+
+                    await event_queue.put(("query_complete", {
                         "hypothesis_index": h_idx,
                         "query_index": q_idx,
+                        "hypothesis_name": h_name,
                         "hypothesis_total": len(hypotheses),
                         "row_count": result["row_count"],
                         "description": query.get("description", ""),
-                    })
+                        "preview_features": preview_features,
+                    }))
+
+        # Launch all hypotheses in parallel
+        tasks = [
+            asyncio.create_task(run_hypothesis(i, h))
+            for i, h in enumerate(hypotheses)
+        ]
+
+        # Drain the event queue as results come in, while tasks are running
+        done_tasks = set()
+        while len(done_tasks) < len(tasks):
+            # Check for completed tasks
+            for t in tasks:
+                if t.done() and t not in done_tasks:
+                    done_tasks.add(t)
+
+            # Drain all available events
+            while not event_queue.empty():
+                evt_type, evt_data = event_queue.get_nowait()
+                yield sse(evt_type, evt_data)
+
+            if len(done_tasks) < len(tasks):
+                await asyncio.sleep(0.05)
+
+        # Final drain of any remaining events
+        while not event_queue.empty():
+            evt_type, evt_data = event_queue.get_nowait()
+            yield sse(evt_type, evt_data)
+
+        # Propagate any exceptions from tasks
+        for t in tasks:
+            if t.exception():
+                pass  # Individual hypothesis failures are non-fatal
 
         # Quality check: if too few results, try a fallback hypothesis
         total_rows = sum(
@@ -2884,7 +3005,10 @@ async def ai_chat_stream(req: ChatRequest):
                 pass
 
         # Phase 3: Rank
-        yield sse("status", {"phase": "ranking", "message": "Ranking and visualizing results..."})
+        yield sse("status", {
+            "phase": "ranking",
+            "message": f"Ranking {total_rows} candidate{'s' if total_rows != 1 else ''} by opportunity score...",
+        })
         try:
             evaluation = await evaluate_hypotheses(user_query, hypotheses)
         except Exception as e:

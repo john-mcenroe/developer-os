@@ -207,3 +207,16 @@ export interface SiteSearchResponse {
 }
 
 export type SearchPhase = 'idle' | 'routing' | 'hypotheses' | 'executing' | 'ranking' | 'done' | 'error';
+
+export interface PreviewFeature {
+  geometry: GeoJSON.Geometry;
+  hypothesisIndex: number;
+  hypothesisName: string;
+}
+
+export interface AreaFocus {
+  area: string;
+  lat: number;
+  lng: number;
+  bbox?: [string, string, string, string]; // [south, north, west, east] from Nominatim
+}
