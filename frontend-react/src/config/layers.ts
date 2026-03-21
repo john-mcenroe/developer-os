@@ -149,6 +149,28 @@ export const LAYER_CONFIGS: LayerConfig[] = [
     group: 'demographics',
   },
 
+  // Risk & Heritage
+  {
+    id: 'flood_zones',
+    label: 'Flood Zones',
+    color: '#2196f3',
+    minZoom: 10,
+    defaultVisible: false,
+    endpoint: '/api/flood_zones',
+    sourceId: 'flood-zones',
+    group: 'risk',
+  },
+  {
+    id: 'niah_buildings',
+    label: 'Protected Structures',
+    color: '#ff9800',
+    minZoom: 12,
+    defaultVisible: false,
+    endpoint: '/api/niah_buildings',
+    sourceId: 'niah-buildings',
+    group: 'risk',
+  },
+
   // Points of Interest
   {
     id: 'osm_amenities',
@@ -177,6 +199,7 @@ export const LAYER_GROUPS = {
   planning: { label: 'Planning', icon: '◈' },
   market: { label: 'Market', icon: '◉' },
   demographics: { label: 'Demographics', icon: '◎' },
+  risk: { label: 'Risk & Heritage', icon: '⚠' },
   poi: { label: 'Points of Interest', icon: '◇' },
 };
 

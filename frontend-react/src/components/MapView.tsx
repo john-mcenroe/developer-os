@@ -319,6 +319,8 @@ export function MapView() {
         'osm_buildings-fill',
         'osm_amenities-fill',
         'osm_transport-fill',
+        'flood_zones-fill',
+        'niah_buildings-fill',
       ].filter((id) => map.getLayer(id));
 
       const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
@@ -397,6 +399,14 @@ export function MapView() {
         setSelectedType('transport');
         setSelectedProps(props);
         setSelectedSourceId('osm-transport');
+      } else if (layerId.startsWith('flood_zones')) {
+        setSelectedType('flood_zone');
+        setSelectedProps(props);
+        setSelectedSourceId('flood-zones');
+      } else if (layerId.startsWith('niah_buildings')) {
+        setSelectedType('niah');
+        setSelectedProps(props);
+        setSelectedSourceId('niah-buildings');
       } else {
         setSelectedType('generic');
         setSelectedProps(props);
@@ -416,6 +426,7 @@ export function MapView() {
       'sold_properties-fill', 'census_small_areas-fill', 'rzlt-fill',
       'side_sites-fill', 'sd_lap_boundaries-fill', 'sd_planning_register-fill',
       'osm_buildings-fill', 'osm_amenities-fill', 'osm_transport-fill',
+      'flood_zones-fill', 'niah_buildings-fill',
     ].filter((id) => map.getLayer(id));
     const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
     map.getCanvas().style.cursor = features.length > 0 ? 'pointer' : '';
@@ -796,6 +807,51 @@ export function MapView() {
             type="line"
             filter={selFilter('side-sites')}
             paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+          />
+        </Source>
+
+        {/* === Flood Zones === */}
+        <Source id="flood-zones" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="flood_zones-fill"
+            type="fill"
+            paint={{
+              'fill-color': [
+                'match', ['get', 'flood_zone'],
+                'A', 'rgba(33, 150, 243, 0.35)',
+                'B', 'rgba(33, 150, 243, 0.15)',
+                'rgba(33, 150, 243, 0.2)',
+              ],
+              'fill-outline-color': 'rgba(33, 150, 243, 0)',
+            }}
+          />
+          <Layer
+            id="flood_zones-outline"
+            type="line"
+            paint={{
+              'line-color': [
+                'match', ['get', 'flood_zone'],
+                'A', '#1565c0',
+                'B', '#64b5f6',
+                '#2196f3',
+              ],
+              'line-width': 1,
+            }}
+          />
+        </Source>
+
+        {/* === NIAH Protected Structures === */}
+        <Source id="niah-buildings" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="niah_buildings-fill"
+            type="circle"
+            paint={{
+              'circle-radius': 6,
+              'circle-color': '#ff9800',
+              'circle-opacity': 0.8,
+              'circle-stroke-width': 1.5,
+              'circle-stroke-color': '#ffffff',
+            }}
           />
         </Source>
 
