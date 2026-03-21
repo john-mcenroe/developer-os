@@ -534,6 +534,98 @@ def get_planning_apps_points(bbox: str = Query(..., description="west,south,east
     return JSONResponse({"type": "FeatureCollection", "features": features})
 
 
+def query_national_planning_bbox(table: str, west, south, east, north):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    ogc_fid AS id,
+                    planningauthority,
+                    applicationnumber,
+                    developmentdescription,
+                    developmentaddress,
+                    applicationstatus,
+                    applicationtype,
+                    decision,
+                    numresidentialunits,
+                    floorarea,
+                    areaofsite,
+                    linkappdetails,
+                    to_char(to_timestamp(receiveddate/1000), 'YYYY-MM-DD') AS received_date,
+                    to_char(to_timestamp(decisiondate/1000), 'YYYY-MM-DD') AS decision_date,
+                    to_char(to_timestamp(grantdate/1000), 'YYYY-MM-DD') AS grant_date,
+                    to_char(to_timestamp(expirydate/1000), 'YYYY-MM-DD') AS expiry_date,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM {table}
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 2000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        (
+            fid, planningauthority, applicationnumber, developmentdescription,
+            developmentaddress, applicationstatus, applicationtype, decision,
+            numresidentialunits, floorarea, areaofsite, linkappdetails,
+            received_date, decision_date, grant_date, expiry_date, geometry,
+        ) = row
+        features.append(
+            {
+                "type": "Feature",
+                "id": fid,
+                "geometry": geometry,
+                "properties": {
+                    "id": fid,
+                    "planningauthority": planningauthority,
+                    "applicationnumber": applicationnumber,
+                    "developmentdescription": developmentdescription,
+                    "developmentaddress": developmentaddress,
+                    "applicationstatus": applicationstatus,
+                    "applicationtype": applicationtype,
+                    "decision": decision,
+                    "numresidentialunits": numresidentialunits,
+                    "floorarea": floorarea,
+                    "areaofsite": areaofsite,
+                    "linkappdetails": linkappdetails,
+                    "received_date": received_date,
+                    "decision_date": decision_date,
+                    "grant_date": grant_date,
+                    "expiry_date": expiry_date,
+                },
+            }
+        )
+    return features
+
+
+@app.get("/api/national_planning_points")
+def get_national_planning_points(bbox: str = Query(..., description="west,south,east,north")):
+    """Return national planning application points within the bounding box as GeoJSON."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+    features = query_national_planning_bbox("national_planning_points", west, south, east, north)
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
+@app.get("/api/national_planning_polygons")
+def get_national_planning_polygons(bbox: str = Query(..., description="west,south,east,north")):
+    """Return national planning application polygons within the bounding box as GeoJSON."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+    features = query_national_planning_bbox("national_planning_polygons", west, south, east, north)
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
 @app.get("/api/lap_boundaries")
 def get_lap_boundaries(bbox: str = Query(..., description="west,south,east,north")):
     """Return South Dublin Local Area Plan boundaries as GeoJSON."""
@@ -1454,6 +1546,7 @@ ALLOWED_TABLES = {
     "sold_properties", "cadastral_freehold", "cadastral_leasehold",
     "rzlt", "dlr_planning_polygons", "dlr_planning_points",
     "census_small_areas", "urban_areas", "osm_buildings",
+    "national_planning_points", "national_planning_polygons",
 }
 
 SQL_BLOCKLIST = re.compile(
@@ -1644,6 +1737,36 @@ TABLE: osm_buildings (OpenStreetMap building footprints for Dublin — ~472k row
   amenity TEXT                -- amenity type if applicable (e.g. 'school', 'hospital')
   area_sqm NUMERIC           -- building footprint area in sqm
   geom GEOMETRY(Polygon, 4326)
+
+TABLE: national_planning_polygons (national planning applications — ~483k rows, LARGE, geom is MultiPolygon)
+  ogc_fid SERIAL PRIMARY KEY
+  planningauthority TEXT      -- e.g. 'Dublin City Council', 'Cork County Council'
+  applicationnumber TEXT      -- planning application reference
+  developmentdescription TEXT -- description of proposed development
+  developmentaddress TEXT     -- site address
+  developmentpostcode TEXT
+  applicationstatus TEXT      -- e.g. 'Decision Made', 'Application Received'
+  applicationtype TEXT        -- e.g. 'Permission', 'Retention', 'Outline Permission'
+  decision TEXT               -- e.g. 'Conditional', 'Refused', 'Grant Permission'
+  landusecode TEXT
+  areaofsite NUMERIC          -- site area
+  numresidentialunits INTEGER -- number of residential units proposed
+  oneoffhouse TEXT
+  floorarea NUMERIC           -- proposed floor area
+  -- DATE COLUMNS: stored as epoch MILLISECONDS (bigint). Convert with to_timestamp(col/1000)::date
+  receiveddate BIGINT         -- application received date (epoch ms)
+  decisiondate BIGINT         -- decision date (epoch ms)
+  grantdate BIGINT            -- grant date (epoch ms)
+  expirydate BIGINT           -- permission expiry date (epoch ms)
+  appealstatus TEXT
+  appealdecision TEXT
+  linkappdetails TEXT          -- URL to application details
+  geom GEOMETRY(MultiPolygon, 4326)
+  -- SPATIAL INDEX on geom. ALWAYS use spatial filter (ST_MakeEnvelope or ST_DWithin) to avoid full table scans.
+
+TABLE: national_planning_points (same columns as national_planning_polygons but geom is Point — ~362k rows, LARGE)
+  -- SPATIAL INDEX on geom. ALWAYS use spatial filter to avoid full table scans.
+  -- DATE COLUMNS: stored as epoch MILLISECONDS (bigint). Convert with to_timestamp(col/1000)::date
   -- SPATIAL INDEX on geom. ALWAYS use spatial filter (ST_MakeEnvelope or ST_DWithin) to avoid full table scans on this large table.
   -- KEY USE: Cross-reference with cadastral parcels to find vacant/undeveloped land (parcels with no building footprint),
   --   identify building density, detect building types in an area, or find large commercial buildings.
@@ -1704,13 +1827,13 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
 
 1. GEOMETRY COLUMNS: Every query MUST include these 3 columns:
    - ST_AsGeoJSON(tablename.geom)::json AS geometry
-   - For POLYGON tables (cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, osm_buildings, census_small_areas, urban_areas):
+   - For POLYGON tables (cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, osm_buildings, census_small_areas, urban_areas, national_planning_polygons):
        ST_X(ST_Centroid(tablename.geom)) AS lng, ST_Y(ST_Centroid(tablename.geom)) AS lat
-   - For POINT tables (sold_properties, dlr_planning_points):
+   - For POINT tables (sold_properties, dlr_planning_points, national_planning_points):
        ST_X(tablename.geom) AS lng, ST_Y(tablename.geom) AS lat
    NOTE: ST_X() and ST_Y() ONLY work on Point geometries. NEVER call ST_X(polygon.geom) — use ST_X(ST_Centroid(polygon.geom)) instead.
 
-2. LARGE TABLES (cadastral_freehold 2M+ rows, osm_buildings 472k rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
+2. LARGE TABLES (cadastral_freehold 2M+ rows, osm_buildings 472k rows, national_planning_polygons 483k rows, national_planning_points 362k rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
 
 3. LIMIT each query to 25 rows max.
 
@@ -1729,7 +1852,7 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
 10. For cross-table spatial queries, prefer ST_DWithin over ST_Intersects for point-to-polygon distance queries.
 
 11. PRIMARY TABLE TAGGING: Every sql_queries entry MUST include a "primary_table" field set to the main table whose rows are returned.
-    Must be one of: sold_properties, cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, dlr_planning_points, census_small_areas, urban_areas, osm_buildings.
+    Must be one of: sold_properties, cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, dlr_planning_points, census_small_areas, urban_areas, osm_buildings, national_planning_points, national_planning_polygons.
     For cross-table joins, use the table whose individual rows appear in the output.
 
 HYPOTHESIS GUIDELINES:
@@ -1835,7 +1958,7 @@ After selecting sites, choose the best map visualization type for this data. Add
 
 "object_type": one of:
   - "markers" — ranked numbered pins (DEFAULT for most queries — specific sites, addresses, individual properties)
-  - "polygon_highlights" — colored parcel/zone boundaries (use when primary_table is cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, or osm_buildings AND geometry column is present in results — lets developer see actual parcel/building shapes)
+  - "polygon_highlights" — colored parcel/zone boundaries (use when primary_table is cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, osm_buildings, or national_planning_polygons AND geometry column is present in results — lets developer see actual parcel/building shapes)
   - "heatmap" — heat density overlay (use when results are 15+ point observations and the insight is WHERE concentration is highest, e.g. price hotspots, planning activity density)
   - "choropleth" — area polygons colored by metric (use when results are census_small_areas or urban_areas and a single normalized metric like vacancy_rate, apartment_pct, or employment_rate tells the story)
 
@@ -2009,7 +2132,7 @@ def validate_sql(sql: str) -> str | None:
     return None
 
 
-POINT_TABLES = {"sold_properties", "dlr_planning_points"}
+POINT_TABLES = {"sold_properties", "dlr_planning_points", "national_planning_points"}
 
 
 def compile_query_plan(plan: dict) -> str:
@@ -2487,6 +2610,8 @@ def infer_table(row: dict) -> str:
         return "sold_properties"
     elif "zone_desc" in row or "site_area" in row:
         return "rzlt"
+    elif "planningauthority" in row or "applicationnumber" in row or "developmentdescription" in row:
+        return "national_planning_polygons"
     elif "plan_ref" in row or "decision" in row:
         return "dlr_planning_polygons"
     elif "osm_id" in row or ("building" in row and "building_levels" in row):

@@ -40,7 +40,7 @@ cd backend && python main.py      # Start API (port 8000)
 
 ## Current Implementation Status
 
-### Data Layers Integrated (8 layers)
+### Data Layers Integrated (11 layers)
 
 | Layer | Table | Source | Records | Status |
 |-------|-------|--------|---------|--------|
@@ -49,16 +49,23 @@ cd backend && python main.py      # Start API (port 8000)
 | RZLT Sites | `rzlt` | Local Authorities | ~4k sites | ✅ Live |
 | DLR Planning (Polygons) | `dlr_planning_polygons` | Dublin City Council | ~15k features | ✅ Live |
 | DLR Planning (Points) | `dlr_planning_points` | Dublin City Council | ~15k features | ✅ Live |
+| National Planning (Polygons) | `national_planning_polygons` | myplan.ie / planning.ie | ~483k features | ✅ Live |
+| National Planning (Points) | `national_planning_points` | myplan.ie / planning.ie | ~362k features | ✅ Live |
+| OSM Buildings | `osm_buildings` | OpenStreetMap Overpass | ~472k buildings | ✅ Live |
 | Sold Properties | `sold_properties` | Property Price Register (PPR) + scraped listings | ~50k properties | ✅ Live |
 | Census Small Areas | `census_small_areas` | CSO Census 2022 | ~4.6k Dublin areas | ✅ Live |
 | Urban Area Boundaries | `urban_areas` | Tailte Éireann | ~11 Dublin areas | ✅ Live |
 
 ### API Endpoints
 
-**Geospatial data** — bbox-based queries for all 8 layers:
+**Geospatial data** — bbox-based queries for all 11 layers:
 - `GET /api/parcels`, `/api/parcels_leasehold`, `/api/rzlt`
 - `GET /api/planning_apps`, `/api/planning_apps_points`
+- `GET /api/national_planning_points`, `/api/national_planning_polygons`
+- `GET /api/osm_buildings`
 - `GET /api/sold_properties`, `/api/census_small_areas`, `/api/urban_areas`
+
+**Note:** National planning date fields are stored as epoch milliseconds (bigint). Convert with `to_timestamp(col/1000)`.
 
 **Analytics:**
 - `GET /api/sold_stats` — Aggregated sale stats within circle (avg/median price, type breakdown, comparables)
