@@ -751,9 +751,25 @@ function CensusCard({ census }: { census: CensusProperties }) {
 
 function PlanningDetail({ props }: { props: PlanningProperties }) {
   const fmtDate = (d?: string) => {
-    if (!d || d === '(null)' || d.length < 8) return '—';
-    return `${d.slice(6, 8)}/${d.slice(4, 6)}/${d.slice(0, 4)}`;
+    if (!d || d === '(null)') return '—';
+    // Handle ISO date format (e.g. "2024-01-15" or "2024-01-15T...")
+    if (d.includes('-') && d.length >= 10) {
+      const parts = d.slice(0, 10).split('-');
+      if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+    }
+    // Handle compact format (e.g. "20240115")
+    if (d.length >= 8 && !d.includes('/') && !d.includes('-')) {
+      return `${d.slice(6, 8)}/${d.slice(4, 6)}/${d.slice(0, 4)}`;
+    }
+    return d;
   };
+
+  // Normalize: support both DLR and national planning field names
+  const planRef = props.plan_ref || props.applicationnumber;
+  const description = props.descrptn || props.developmentdescription;
+  const location = props.location || props.developmentaddress;
+  const authority = props.plan_auth || props.planningauthority;
+  const regDate = props.reg_date || props.received_date;
 
   const isGranted = props.decision?.toUpperCase().includes('GRANT');
   const isRefused = props.decision?.toUpperCase().includes('REFUS');
@@ -764,33 +780,33 @@ function PlanningDetail({ props }: { props: PlanningProperties }) {
     <div className="detail-cards">
       <div className="hero-card">
         <div className="hero-grid cols-1">
-          <HeroStat value={props.plan_ref || '—'} label="Planning Reference" color="#2ecc71" />
+          <HeroStat value={planRef || '—'} label="Planning Reference" color="#2ecc71" />
         </div>
         <div className="hero-tags">
           <Tag text={statusLabel} color={statusColor} />
-          {props.plan_auth && <Tag text={props.plan_auth} color="#6b7394" />}
+          {authority && <Tag text={authority} color="#6b7394" />}
         </div>
       </div>
 
-      {props.descrptn && (
+      {description && (
         <Card title="Description" accent="#2ecc71">
-          <p className="card-text">{props.descrptn}</p>
+          <p className="card-text">{description}</p>
         </Card>
       )}
 
       <Card title="Details" accent="#2ecc71">
-        <Row label="Location" value={props.location || '—'} />
+        <Row label="Location" value={location || '—'} />
         <Row label="Stage" value={props.stage || '—'} />
-        <Row label="Registered" value={fmtDate(props.reg_date)} />
+        <Row label="Registered" value={fmtDate(regDate)} />
         <Row label="Decision Date" value={fmtDate(props.dec_date)} />
       </Card>
 
-      {props.descrptn && (
+      {description && (
         <VisualizeButton
-          description={props.descrptn}
-          location={props.location}
+          description={description}
+          location={location}
           decision={props.decision}
-          planRef={props.plan_ref}
+          planRef={planRef}
         />
       )}
 

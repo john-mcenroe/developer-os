@@ -55,6 +55,12 @@ export interface PlanningProperties {
   app_dec?: string;
   dec_date?: string;
   more_info?: string;
+  // National planning fields
+  applicationnumber?: string;
+  planningauthority?: string;
+  developmentdescription?: string;
+  developmentaddress?: string;
+  received_date?: string;
 }
 
 export interface SoldPropertyProperties {

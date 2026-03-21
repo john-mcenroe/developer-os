@@ -94,6 +94,26 @@ export const LAYER_CONFIGS: LayerConfig[] = [
     sourceId: 'sd-planning-register',
     group: 'planning',
   },
+  {
+    id: 'national_planning_polygons',
+    label: 'National Planning (Areas)',
+    color: '#3498db',
+    minZoom: 13,
+    defaultVisible: false,
+    endpoint: '/api/national_planning_polygons',
+    sourceId: 'national-planning-polygons',
+    group: 'planning',
+  },
+  {
+    id: 'national_planning_points',
+    label: 'National Planning (Points)',
+    color: '#2980b9',
+    minZoom: 12,
+    defaultVisible: false,
+    endpoint: '/api/national_planning_points',
+    sourceId: 'national-planning-points',
+    group: 'planning',
+  },
 
   // Market
   {

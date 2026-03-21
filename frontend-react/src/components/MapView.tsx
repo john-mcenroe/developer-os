@@ -86,6 +86,8 @@ export function MapView() {
     rzlt: 'rzlt',
     dlr_planning_polygons: 'planning',
     dlr_planning_points: 'planning',
+    national_planning_polygons: 'planning',
+    national_planning_points: 'planning',
     census_small_areas: 'census',
     side_sites: 'side_site',
   };
@@ -306,6 +308,8 @@ export function MapView() {
         'cadastral_leasehold-fill',
         'dlr_planning_polygons-fill',
         'dlr_planning_points-fill',
+        'national_planning_polygons-fill',
+        'national_planning_points-fill',
         'sold_properties-fill',
         'census_small_areas-fill',
         'rzlt-fill',
@@ -346,6 +350,14 @@ export function MapView() {
         setSelectedType('planning');
         setSelectedProps(props);
         setSelectedSourceId('dlr-planning-polygons');
+      } else if (layerId.startsWith('national_planning_polygons')) {
+        setSelectedType('planning');
+        setSelectedProps(props);
+        setSelectedSourceId('national-planning-polygons');
+      } else if (layerId.startsWith('national_planning_points')) {
+        setSelectedType('planning');
+        setSelectedProps(props);
+        setSelectedSourceId('national-planning-points');
       } else if (layerId.startsWith('sold_properties')) {
         setSelectedType('sold');
         setSelectedProps(props);
@@ -385,6 +397,7 @@ export function MapView() {
     const interactiveLayers = [
       'cadastral_freehold-fill', 'cadastral_leasehold-fill',
       'dlr_planning_polygons-fill', 'dlr_planning_points-fill',
+      'national_planning_polygons-fill', 'national_planning_points-fill',
       'sold_properties-fill', 'census_small_areas-fill', 'rzlt-fill',
       'side_sites-fill', 'sd_lap_boundaries-fill', 'sd_planning_register-fill',
     ].filter((id) => map.getLayer(id));
@@ -691,6 +704,53 @@ export function MapView() {
                 '#e67e22',
               ],
               'line-width': 2,
+            }}
+          />
+        </Source>
+
+        {/* === National Planning Polygons === */}
+        <Source id="national-planning-polygons" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="national_planning_polygons-fill"
+            type="fill"
+            paint={{ 'fill-color': 'rgba(52, 152, 219, 0.2)', 'fill-outline-color': 'rgba(52, 152, 219, 0)' }}
+          />
+          <Layer
+            id="national_planning_polygons-outline"
+            type="line"
+            paint={{ 'line-color': '#3498db', 'line-width': 2 }}
+          />
+          <Layer
+            id="national_planning_polygons-selected"
+            type="fill"
+            filter={selFilter('national-planning-polygons')}
+            paint={{ 'fill-color': 'rgba(52, 152, 219, 0.45)', 'fill-outline-color': '#2980b9' }}
+          />
+          <Layer
+            id="national_planning_polygons-selected-outline"
+            type="line"
+            filter={selFilter('national-planning-polygons')}
+            paint={{ 'line-color': '#ffffff', 'line-width': 4 }}
+          />
+          <Layer
+            id="national_planning_polygons-selected-glow"
+            type="line"
+            filter={selFilter('national-planning-polygons')}
+            paint={{ 'line-color': '#3498db', 'line-width': 10, 'line-opacity': 0.25, 'line-blur': 6 }}
+          />
+        </Source>
+
+        {/* === National Planning Points === */}
+        <Source id="national-planning-points" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="national_planning_points-fill"
+            type="circle"
+            paint={{
+              'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 2, 15, 3.5, 18, 5],
+              'circle-color': '#2980b9',
+              'circle-stroke-color': 'rgba(255,255,255,0.5)',
+              'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 12, 0, 15, 0.5],
+              'circle-opacity': ['interpolate', ['linear'], ['zoom'], 12, 0.5, 15, 0.7, 18, 0.85],
             }}
           />
         </Source>
