@@ -480,6 +480,112 @@ def get_osm_transport(bbox: str = Query(..., description="west,south,east,north"
     return JSONResponse({"type": "FeatureCollection", "features": features})
 
 
+@app.get("/api/flood_zones")
+def get_flood_zones(bbox: str = Query(..., description="west,south,east,north")):
+    """Return OPW flood zone polygons as GeoJSON within a bounding box."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id, flood_zone, flood_type, source, aep,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM flood_zones
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 3000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        fid, flood_zone, flood_type, source, aep, geometry = row
+        features.append({
+            "type": "Feature",
+            "id": fid,
+            "geometry": geometry,
+            "properties": {
+                "id": fid,
+                "flood_zone": flood_zone,
+                "flood_type": flood_type,
+                "source": source,
+                "aep": aep,
+                "label": f"Flood Zone {flood_zone} ({flood_type})",
+            },
+        })
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
+@app.get("/api/niah_buildings")
+def get_niah_buildings(bbox: str = Query(..., description="west,south,east,north")):
+    """Return NIAH protected structures as GeoJSON within a bounding box."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    ogc_fid, reg_no, name, number, street1, town, county,
+                    original_type, in_use_as_type, rating,
+                    datefrom, dateto, description, image_link, website_link,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM niah_buildings
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 2000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        (fid, reg_no, name, number, street1, town, county,
+         original_type, in_use_as_type, rating,
+         datefrom, dateto, description, image_link, website_link, geometry) = row
+        label = name or f"{number or ''} {street1 or ''}".strip() or f"NIAH {reg_no}"
+        features.append({
+            "type": "Feature",
+            "id": fid,
+            "geometry": geometry,
+            "properties": {
+                "id": fid,
+                "reg_no": reg_no,
+                "name": label,
+                "number": number,
+                "street": street1,
+                "town": town,
+                "county": county,
+                "original_type": original_type,
+                "in_use_as": in_use_as_type,
+                "rating": rating,
+                "date_from": datefrom,
+                "date_to": dateto,
+                "description": (description[:300] + "...") if description and len(description) > 300 else description,
+                "image_link": image_link,
+                "website_link": website_link,
+            },
+        })
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
 @app.get("/api/census_stats")
 def get_census_stats(
     lng: float = Query(...),
@@ -1656,6 +1762,7 @@ ALLOWED_TABLES = {
     "census_small_areas", "urban_areas", "osm_buildings",
     "national_planning_points", "national_planning_polygons",
     "osm_amenities", "osm_transport",
+    "flood_zones", "niah_buildings",
 }
 
 SQL_BLOCKLIST = re.compile(
@@ -1872,6 +1979,36 @@ TABLE: osm_transport (OpenStreetMap public transport stops for all of Ireland �
   highway TEXT                -- highway type if applicable
   geom GEOMETRY(Point, 4326)
 
+TABLE: flood_zones (OPW flood risk zones for Ireland — ~132k polygons, geom is MultiPolygon)
+  id SERIAL PRIMARY KEY
+  flood_zone TEXT              -- 'A' (high risk: 1% river / 0.5% coastal) or 'B' (moderate risk: 0.1% AEP)
+  flood_type TEXT              -- 'river' or 'coastal'
+  source TEXT                  -- 'CFRAM' (detailed, major towns) or 'NIFM' (nationwide indicative)
+  aep TEXT                     -- Annual Exceedance Probability: '1%', '0.5%', '0.1%'
+  geom GEOMETRY(MultiPolygon, 4326)
+  -- Flood Zone A = high probability flooding (>=1% river, >=0.5% coastal). Most restrictive for development.
+  -- Flood Zone B = moderate probability (0.1% to 1% river). Some development restrictions.
+  -- Flood Zone C (not in table) = low probability (<0.1%). Generally suitable for development.
+  -- Use ST_Intersects to check if a parcel/site overlaps a flood zone.
+
+TABLE: niah_buildings (NIAH protected structures — 48,327 buildings across Ireland, geom is Point)
+  ogc_fid SERIAL PRIMARY KEY
+  reg_no INTEGER               -- NIAH registration number
+  name TEXT                    -- building name
+  number TEXT                  -- street number
+  street1 TEXT                 -- street name
+  town TEXT                    -- town
+  county TEXT                  -- county
+  original_type TEXT           -- original use (e.g. 'house', 'church', 'school', 'bridge')
+  in_use_as_type TEXT          -- current use
+  rating TEXT                  -- heritage rating: 'Regional', 'National', 'International'
+  datefrom INTEGER             -- construction start year
+  dateto INTEGER               -- construction end year
+  description TEXT             -- physical description of building
+  geom GEOMETRY(Point, 4326)
+  -- Protected structures have legal restrictions on alterations/demolition.
+  -- Use ST_DWithin to find protected structures near a development site.
+
 TABLE: national_planning_polygons (national planning applications — ~483k rows, LARGE, geom is MultiPolygon)
   ogc_fid SERIAL PRIMARY KEY
   planningauthority TEXT      -- e.g. 'Dublin City Council', 'Cork County Council'
@@ -1967,7 +2104,7 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
        ST_X(tablename.geom) AS lng, ST_Y(tablename.geom) AS lat
    NOTE: ST_X() and ST_Y() ONLY work on Point geometries. NEVER call ST_X(polygon.geom) — use ST_X(ST_Centroid(polygon.geom)) instead.
 
-2. LARGE TABLES (cadastral_freehold 2M+ rows, osm_buildings 472k rows, osm_amenities 415k rows, national_planning_polygons 483k rows, national_planning_points 362k rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
+2. LARGE TABLES (cadastral_freehold 2M+ rows, osm_buildings 472k rows, osm_amenities 415k rows, flood_zones 132k rows, national_planning_polygons 483k rows, national_planning_points 362k rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
 
 3. LIMIT each query to 25 rows max.
 
