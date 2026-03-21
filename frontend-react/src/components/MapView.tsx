@@ -19,7 +19,7 @@ import { SiteSearch } from './SiteSearch';
 import { ZoomIndicator } from './ZoomIndicator';
 import { BasemapToggle } from './BasemapToggle';
 
-import type { ViewState, SiteSearchResult } from '../types';
+import type { ViewState, SiteSearchResult, AreaFocus } from '../types';
 
 const OSM_STYLE = {
   version: 8 as const,
@@ -135,6 +135,99 @@ export function MapView() {
     setSearchSelectedIndex(null);
   }, [siteSearchClear]);
 
+  // Hypothesis colors for preview polygons
+  const HYPOTHESIS_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#06b6d4'];
+
+  // Build GeoJSON for preview polygon regions (areas lighting up during search)
+  const previewPolygonsGeoJSON: GeoJSON.FeatureCollection = {
+    type: 'FeatureCollection',
+    features: siteSearch.previewFeatures
+      .filter(f => f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon')
+      .map((f, i) => ({
+        type: 'Feature' as const,
+        geometry: f.geometry,
+        properties: {
+          idx: i,
+          hypothesisIndex: f.hypothesisIndex,
+          color: HYPOTHESIS_COLORS[f.hypothesisIndex % HYPOTHESIS_COLORS.length],
+        },
+      })),
+  };
+
+  // Preview point markers for Point-type results during search
+  const previewPointsGeoJSON: GeoJSON.FeatureCollection = {
+    type: 'FeatureCollection',
+    features: siteSearch.previewFeatures
+      .filter(f => f.geometry.type === 'Point')
+      .map((f, i) => ({
+        type: 'Feature' as const,
+        geometry: f.geometry,
+        properties: {
+          idx: i,
+          hypothesisIndex: f.hypothesisIndex,
+          color: HYPOTHESIS_COLORS[f.hypothesisIndex % HYPOTHESIS_COLORS.length],
+        },
+      })),
+  };
+
+  // Fly to area when AI detects a named location
+  const prevAreaRef = useRef<AreaFocus | null>(null);
+  useEffect(() => {
+    const focus = siteSearch.areaFocus;
+    if (!focus || focus === prevAreaRef.current) return;
+    prevAreaRef.current = focus;
+
+    if (focus.bbox && focus.bbox.length === 4) {
+      // Nominatim bbox is [south, north, west, east]
+      const [south, north, west, east] = focus.bbox.map(Number);
+      mapRef.current?.fitBounds(
+        [[west, south], [east, north]],
+        { padding: 60, duration: 2000, maxZoom: 15 },
+      );
+    } else {
+      mapRef.current?.flyTo({
+        center: [focus.lng, focus.lat],
+        zoom: 14,
+        duration: 2000,
+      });
+    }
+  }, [siteSearch.areaFocus]);
+
+  // Fit bounds to final results when search completes
+  const prevResultCountRef = useRef(0);
+  useEffect(() => {
+    const results = siteSearch.results;
+    if (results.length === 0 || results.length === prevResultCountRef.current) return;
+    prevResultCountRef.current = results.length;
+
+    if (results.length >= 2) {
+      let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity;
+      for (const r of results) {
+        if (r.lng < minLng) minLng = r.lng;
+        if (r.lng > maxLng) maxLng = r.lng;
+        if (r.lat < minLat) minLat = r.lat;
+        if (r.lat > maxLat) maxLat = r.lat;
+      }
+      // Only fit bounds if results span a meaningful area (not all same point)
+      const lngSpan = maxLng - minLng;
+      const latSpan = maxLat - minLat;
+      if (lngSpan > 0.001 || latSpan > 0.001) {
+        mapRef.current?.fitBounds(
+          [[minLng, minLat], [maxLng, maxLat]],
+          { padding: 80, duration: 1500, maxZoom: 16 },
+        );
+      }
+    }
+  }, [siteSearch.results]);
+
+  // Clear ghost marker count on new search
+  useEffect(() => {
+    if (siteSearch.phase === 'idle') {
+      prevResultCountRef.current = 0;
+      prevAreaRef.current = null;
+    }
+  }, [siteSearch.phase]);
+
   // Build GeoJSON for search result markers (points for numbered pins)
   const searchResultsGeoJSON: GeoJSON.FeatureCollection = {
     type: 'FeatureCollection',
@@ -157,12 +250,12 @@ export function MapView() {
       : [],
   };
 
-  // Build GeoJSON for ALL unselected results that have polygon geometries
-  const unselectedResultsGeoJSON: GeoJSON.FeatureCollection = {
+  // Build GeoJSON for ALL results that have polygon geometries (always visible for browsing)
+  const allResultPolygonsGeoJSON: GeoJSON.FeatureCollection = {
     type: 'FeatureCollection',
     features: siteSearch.results
       .map((r, i) => ({ r, i }))
-      .filter(({ r, i }) => i !== searchSelectedIndex && r.geometry && r.geometry.type !== 'Point')
+      .filter(({ r }) => r.geometry && r.geometry.type !== 'Point')
       .map(({ r, i }) => ({
         type: 'Feature' as const,
         geometry: r.geometry!,
@@ -544,6 +637,20 @@ export function MapView() {
           />
         </Source>
 
+        {/* === OSM Buildings === */}
+        <Source id="osm-buildings" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="osm_buildings-fill"
+            type="fill"
+            paint={{ 'fill-color': 'rgba(141, 110, 99, 0.15)', 'fill-outline-color': 'rgba(141, 110, 99, 0)' }}
+          />
+          <Layer
+            id="osm_buildings-outline"
+            type="line"
+            paint={{ 'line-color': '#8d6e63', 'line-width': 0.5 }}
+          />
+        </Source>
+
         {/* === SD LAP Boundaries === */}
         <Source id="sd-lap-boundaries" type="geojson" data={EMPTY_FC}>
           <Layer
@@ -616,13 +723,61 @@ export function MapView() {
           />
         </Source>
 
-        {/* === AI Search Results: Unselected polygon outlines === */}
-        <Source id="ai-results-unselected-polys" type="geojson" data={unselectedResultsGeoJSON}>
+        {/* === Preview Polygons (regions lighting up during search, colored by hypothesis) === */}
+        <Source id="preview-polygons" type="geojson" data={previewPolygonsGeoJSON}>
+          <Layer
+            id="preview-polygons-fill"
+            type="fill"
+            paint={{
+              'fill-color': ['get', 'color'],
+              'fill-opacity': 0.2,
+            }}
+          />
+          <Layer
+            id="preview-polygons-outline"
+            type="line"
+            paint={{
+              'line-color': ['get', 'color'],
+              'line-width': 2,
+              'line-opacity': 0.6,
+            }}
+          />
+          <Layer
+            id="preview-polygons-glow"
+            type="line"
+            paint={{
+              'line-color': ['get', 'color'],
+              'line-width': 8,
+              'line-opacity': 0.1,
+              'line-blur': 4,
+            }}
+          />
+        </Source>
+
+        {/* === Preview Points (point results during search) === */}
+        <Source id="preview-points" type="geojson" data={previewPointsGeoJSON}>
+          <Layer
+            id="preview-points-circles"
+            type="circle"
+            paint={{
+              'circle-radius': 7,
+              'circle-color': ['get', 'color'],
+              'circle-opacity': 0.5,
+              'circle-stroke-width': 1.5,
+              'circle-stroke-color': ['get', 'color'],
+              'circle-stroke-opacity': 0.7,
+            }}
+          />
+        </Source>
+
+        {/* === AI Search Results: All result polygon fills (always visible for browsing) === */}
+        <Source id="ai-results-unselected-polys" type="geojson" data={allResultPolygonsGeoJSON}>
           <Layer
             id="ai-unselected-fill"
             type="fill"
             paint={{
-              'fill-color': 'rgba(59, 130, 246, 0.08)',
+              'fill-color': '#3b82f6',
+              'fill-opacity': 0.18,
             }}
           />
           <Layer
@@ -630,8 +785,18 @@ export function MapView() {
             type="line"
             paint={{
               'line-color': '#3b82f6',
-              'line-width': 1.5,
-              'line-opacity': 0.4,
+              'line-width': 2,
+              'line-opacity': 0.6,
+            }}
+          />
+          <Layer
+            id="ai-unselected-glow"
+            type="line"
+            paint={{
+              'line-color': '#3b82f6',
+              'line-width': 6,
+              'line-opacity': 0.1,
+              'line-blur': 4,
             }}
           />
         </Source>
@@ -729,6 +894,8 @@ export function MapView() {
         hypothesesCount={siteSearch.hypothesesCount}
         hypothesesNames={siteSearch.hypothesesNames}
         queriesCompleted={siteSearch.queriesCompleted}
+        previewPointCount={siteSearch.previewFeatures.length}
+        areaFocus={siteSearch.areaFocus}
         selectedIndex={searchSelectedIndex}
         onSearch={handleSiteSearch}
         onClear={handleSearchClear}

@@ -2,6 +2,7 @@
 *.gml
 *.gfs
 *.geojson
+osm_buildings_dublin.json
 
 # Python cache
 __pycache__/

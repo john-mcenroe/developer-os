@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { SiteSearchResult } from '../types';
+import type { SiteSearchResult, AreaFocus } from '../types';
+
+const HYPOTHESIS_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#06b6d4'];
 
 const PLACEHOLDER_PROMPTS = [
   'Find large sites near DART stations with RZLT tax pressure...',
@@ -21,6 +23,8 @@ interface SiteSearchProps {
   hypothesesCount: number;
   hypothesesNames: string[];
   queriesCompleted: number;
+  previewPointCount: number;
+  areaFocus: AreaFocus | null;
   selectedIndex: number | null;
   onSearch: (query: string) => void;
   onClear: () => void;
@@ -36,9 +40,11 @@ export function SiteSearch({
   phase,
   phaseMessage,
   error,
-  hypothesesCount,
+  hypothesesCount: _hypothesesCount,
   hypothesesNames,
   queriesCompleted,
+  previewPointCount,
+  areaFocus,
   selectedIndex,
   onSearch,
   onClear,
@@ -136,25 +142,56 @@ export function SiteSearch({
             </div>
           )}
 
-          {/* Loading state */}
+          {/* Loading state — AI narration */}
           {isLoading && !hasResults && (
             <div className="search-loading">
-              <div className="search-loading-header">
-                <span className="search-loading-dot" />
-                <span className="search-loading-text">{phaseMessage}</span>
+              {/* Narration message */}
+              <div className="search-narration">
+                <span className="search-narration-dot" />
+                <span className="search-narration-text">{phaseMessage}</span>
               </div>
-              {hypothesesNames.length > 0 && (
-                <div className="search-strategies">
-                  {hypothesesNames.map((name, i) => (
-                    <div key={i} className={`search-strategy ${i < queriesCompleted ? 'done' : i === queriesCompleted ? 'active' : ''}`}>
-                      <span className="search-strategy-icon">
-                        {i < queriesCompleted ? '✓' : i === queriesCompleted ? '⟳' : '○'}
-                      </span>
-                      <span className="search-strategy-name">{name}</span>
-                    </div>
-                  ))}
+
+              {/* Area focus badge */}
+              {areaFocus && (
+                <div className="search-area-badge">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                    <circle cx="12" cy="10" r="3" />
+                  </svg>
+                  {areaFocus.area}
                 </div>
               )}
+
+              {/* Hypothesis progress — parallel execution */}
+              {hypothesesNames.length > 0 && (
+                <div className="search-strategies">
+                  {hypothesesNames.map((name, i) => {
+                    const isDone = queriesCompleted > i; // simplified: completed count tracks unique hypotheses
+                    const isActive = !isDone && phase === 'executing';
+                    const hColor = HYPOTHESIS_COLORS[i % HYPOTHESIS_COLORS.length];
+                    return (
+                      <div key={i} className={`search-strategy ${isDone ? 'done' : isActive ? 'active' : ''}`}>
+                        <span
+                          className="search-strategy-dot"
+                          style={{ background: isDone ? hColor : isActive ? hColor : 'rgba(255,255,255,0.15)' }}
+                        />
+                        <span className="search-strategy-name">{name}</span>
+                        {isDone && <span className="search-strategy-check">✓</span>}
+                        {isActive && <span className="search-strategy-spinner">⟳</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Ghost marker count */}
+              {previewPointCount > 0 && (
+                <div className="search-preview-count">
+                  {previewPointCount} candidate{previewPointCount !== 1 ? 's' : ''} on map
+                </div>
+              )}
+
+              {/* Skeleton fallback when no hypotheses yet */}
               {hypothesesNames.length === 0 && (
                 <div className="search-loading-skeleton">
                   {[1, 2, 3].map(i => (

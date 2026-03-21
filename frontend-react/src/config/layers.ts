@@ -43,6 +43,16 @@ export const LAYER_CONFIGS: LayerConfig[] = [
     group: 'boundaries',
   },
   {
+    id: 'osm_buildings',
+    label: 'OSM Buildings',
+    color: '#8d6e63',
+    minZoom: 14,
+    defaultVisible: false,
+    endpoint: '/api/osm_buildings',
+    sourceId: 'osm-buildings',
+    group: 'boundaries',
+  },
+  {
     id: 'sd_lap_boundaries',
     label: 'LAP Boundaries',
     color: '#9b59b6',

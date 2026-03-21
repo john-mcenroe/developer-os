@@ -310,6 +310,68 @@ def get_urban_areas(bbox: str = Query(..., description="west,south,east,north"))
     return JSONResponse({"type": "FeatureCollection", "features": features})
 
 
+@app.get("/api/osm_buildings")
+def get_osm_buildings(bbox: str = Query(..., description="west,south,east,north")):
+    """Return OSM building footprints as GeoJSON within a bounding box."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    osm_id AS id,
+                    building,
+                    name,
+                    addr_housenumber,
+                    addr_street,
+                    addr_city,
+                    building_levels,
+                    amenity,
+                    area_sqm,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM osm_buildings
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 3000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        (
+            osm_id, building, name, addr_housenumber, addr_street,
+            addr_city, building_levels, amenity, area_sqm, geometry,
+        ) = row
+        features.append(
+            {
+                "type": "Feature",
+                "id": osm_id,
+                "geometry": geometry,
+                "properties": {
+                    "id": osm_id,
+                    "building": building,
+                    "name": name,
+                    "addr_housenumber": addr_housenumber,
+                    "addr_street": addr_street,
+                    "addr_city": addr_city,
+                    "building_levels": building_levels,
+                    "amenity": amenity,
+                    "area_sqm": round(area_sqm, 1) if area_sqm else None,
+                },
+            }
+        )
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
 @app.get("/api/census_stats")
 def get_census_stats(
     lng: float = Query(...),
@@ -1391,7 +1453,7 @@ def get_side_sites(
 ALLOWED_TABLES = {
     "sold_properties", "cadastral_freehold", "cadastral_leasehold",
     "rzlt", "dlr_planning_polygons", "dlr_planning_points",
-    "census_small_areas", "urban_areas",
+    "census_small_areas", "urban_areas", "osm_buildings",
 }
 
 SQL_BLOCKLIST = re.compile(
@@ -1571,6 +1633,22 @@ TABLE: urban_areas (Urban area boundary polygons — ~11 Dublin rows, geom is Po
   county TEXT
   geom GEOMETRY(Polygon, 4326)
 
+TABLE: osm_buildings (OpenStreetMap building footprints for Dublin — ~472k rows, geom is Polygon)
+  osm_id BIGINT PRIMARY KEY
+  building TEXT               -- building type: 'house', 'apartments', 'residential', 'yes', 'commercial', 'retail', 'industrial', etc.
+  name TEXT                   -- building name (often NULL)
+  addr_housenumber TEXT       -- house number
+  addr_street TEXT            -- street name
+  addr_city TEXT              -- city name
+  building_levels TEXT        -- number of storeys (as text)
+  amenity TEXT                -- amenity type if applicable (e.g. 'school', 'hospital')
+  area_sqm NUMERIC           -- building footprint area in sqm
+  geom GEOMETRY(Polygon, 4326)
+  -- SPATIAL INDEX on geom. ALWAYS use spatial filter (ST_MakeEnvelope or ST_DWithin) to avoid full table scans on this large table.
+  -- KEY USE: Cross-reference with cadastral parcels to find vacant/undeveloped land (parcels with no building footprint),
+  --   identify building density, detect building types in an area, or find large commercial buildings.
+  -- Common building values: 'yes' (unclassified), 'house', 'apartments', 'residential', 'commercial', 'retail', 'industrial', 'garage', 'shed'
+
 COORDINATE SYSTEMS:
 - All geometries stored in EPSG:4326 (WGS84)
 - For accurate distance/area calculations, use ST_Transform(geom, 2157) (Irish Transverse Mercator)
@@ -1626,13 +1704,13 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
 
 1. GEOMETRY COLUMNS: Every query MUST include these 3 columns:
    - ST_AsGeoJSON(tablename.geom)::json AS geometry
-   - For POLYGON tables (cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons):
+   - For POLYGON tables (cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, osm_buildings, census_small_areas, urban_areas):
        ST_X(ST_Centroid(tablename.geom)) AS lng, ST_Y(ST_Centroid(tablename.geom)) AS lat
    - For POINT tables (sold_properties, dlr_planning_points):
        ST_X(tablename.geom) AS lng, ST_Y(tablename.geom) AS lat
    NOTE: ST_X() and ST_Y() ONLY work on Point geometries. NEVER call ST_X(polygon.geom) — use ST_X(ST_Centroid(polygon.geom)) instead.
 
-2. CADASTRAL TABLES (2M+ rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
+2. LARGE TABLES (cadastral_freehold 2M+ rows, osm_buildings 472k rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
 
 3. LIMIT each query to 25 rows max.
 
@@ -1651,7 +1729,7 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
 10. For cross-table spatial queries, prefer ST_DWithin over ST_Intersects for point-to-polygon distance queries.
 
 11. PRIMARY TABLE TAGGING: Every sql_queries entry MUST include a "primary_table" field set to the main table whose rows are returned.
-    Must be one of: sold_properties, cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, dlr_planning_points, census_small_areas, urban_areas.
+    Must be one of: sold_properties, cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, dlr_planning_points, census_small_areas, urban_areas, osm_buildings.
     For cross-table joins, use the table whose individual rows appear in the output.
 
 HYPOTHESIS GUIDELINES:
@@ -1757,7 +1835,7 @@ After selecting sites, choose the best map visualization type for this data. Add
 
 "object_type": one of:
   - "markers" — ranked numbered pins (DEFAULT for most queries — specific sites, addresses, individual properties)
-  - "polygon_highlights" — colored parcel/zone boundaries (use when primary_table is cadastral_freehold, cadastral_leasehold, rzlt, or dlr_planning_polygons AND geometry column is present in results — lets developer see actual parcel shapes)
+  - "polygon_highlights" — colored parcel/zone boundaries (use when primary_table is cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, or osm_buildings AND geometry column is present in results — lets developer see actual parcel/building shapes)
   - "heatmap" — heat density overlay (use when results are 15+ point observations and the insight is WHERE concentration is highest, e.g. price hotspots, planning activity density)
   - "choropleth" — area polygons colored by metric (use when results are census_small_areas or urban_areas and a single normalized metric like vacancy_rate, apartment_pct, or employment_rate tells the story)
 
@@ -2411,6 +2489,8 @@ def infer_table(row: dict) -> str:
         return "rzlt"
     elif "plan_ref" in row or "decision" in row:
         return "dlr_planning_polygons"
+    elif "osm_id" in row or ("building" in row and "building_levels" in row):
+        return "osm_buildings"
     elif "nationalcadastralreference" in row or ("area_sqm" in row and "address" not in row):
         return "cadastral_freehold"
     return "unknown"
@@ -2672,6 +2752,30 @@ async def ai_chat(req: ChatRequest):
     }
 
 
+def _simplify_geom(geom: dict, max_points: int = 30) -> dict:
+    """Simplify a GeoJSON geometry for SSE preview payloads."""
+    if geom["type"] == "Polygon":
+        ring = geom["coordinates"][0]
+        if len(ring) > max_points:
+            step = max(1, len(ring) // max_points)
+            ring = [ring[i] for i in range(0, len(ring), step)]
+            if ring[-1] != geom["coordinates"][0][-1]:
+                ring.append(geom["coordinates"][0][-1])
+        return {"type": "Polygon", "coordinates": [ring]}
+    elif geom["type"] == "MultiPolygon":
+        simplified = []
+        for poly in geom["coordinates"]:
+            ring = poly[0]
+            if len(ring) > max_points:
+                step = max(1, len(ring) // max_points)
+                ring = [ring[i] for i in range(0, len(ring), step)]
+                if ring[-1] != poly[0][-1]:
+                    ring.append(poly[0][-1])
+            simplified.append([ring])
+        return {"type": "MultiPolygon", "coordinates": simplified}
+    return geom
+
+
 @app.post("/api/ai/chat/stream")
 async def ai_chat_stream(req: ChatRequest):
     """SSE streaming version of the AI chat endpoint.
@@ -2755,7 +2859,38 @@ async def ai_chat_stream(req: ChatRequest):
             return
 
         # Explore pipeline
-        yield sse("status", {"phase": "hypotheses", "message": "Forming spatial hypotheses..."})
+        # Detect area early for map fly-to
+        detected_area = extract_area_from_query(user_query)
+        if detected_area:
+            # Geocode the area to get coordinates for map fly-to
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    geo_resp = await client.get(
+                        "https://nominatim.openstreetmap.org/search",
+                        params={
+                            "q": f"{detected_area}, Dublin, Ireland",
+                            "format": "json",
+                            "limit": 1,
+                            "countrycodes": "ie",
+                        },
+                        headers={"User-Agent": "LandOS/1.0"},
+                    )
+                    if geo_resp.status_code == 200 and geo_resp.json():
+                        geo = geo_resp.json()[0]
+                        yield sse("area_focus", {
+                            "area": detected_area,
+                            "lat": float(geo["lat"]),
+                            "lng": float(geo["lon"]),
+                            "bbox": geo.get("boundingbox"),
+                        })
+            except Exception:
+                # Non-critical — skip fly-to if geocoding fails
+                pass
+
+        yield sse("status", {
+            "phase": "hypotheses",
+            "message": f"Forming hypotheses{f' for {detected_area}' if detected_area else ''}...",
+        })
         try:
             hypotheses = await generate_hypotheses(req.messages, req.map_context, conv_ctx)
         except Exception as e:
@@ -2767,13 +2902,32 @@ async def ai_chat_stream(req: ChatRequest):
             "names": [h.get("name", "") for h in hypotheses],
         })
 
-        # Phase 2: Execute SQL with agentic retry loop
-        yield sse("status", {"phase": "executing", "message": "Testing hypotheses against the database..."})
+        # Phase 2: Execute hypotheses in parallel
+        import asyncio
+
+        h_names = [h.get("name", f"Strategy {i+1}") for i, h in enumerate(hypotheses)]
+        yield sse("status", {
+            "phase": "executing",
+            "message": f"Testing {len(hypotheses)} hypotheses in parallel...",
+        })
         total_queries = 0
         successful_queries = 0
         MAX_SQL_RETRIES = 2
 
-        for h_idx, hypothesis in enumerate(hypotheses):
+        # Queue collects SSE events from parallel hypothesis workers
+        event_queue: asyncio.Queue = asyncio.Queue()
+
+        async def run_hypothesis(h_idx: int, hypothesis: dict):
+            """Execute a single hypothesis's queries (with retries) and push events to queue."""
+            nonlocal total_queries, successful_queries
+            h_name = hypothesis.get("name", f"Strategy {h_idx + 1}")
+
+            # Signal that this hypothesis is starting
+            await event_queue.put(("hypothesis_start", {
+                "hypothesis_index": h_idx,
+                "hypothesis_name": h_name,
+            }))
+
             for q_idx, query in enumerate(hypothesis.get("sql_queries", [])):
                 sql = query.get("sql", "")
                 query_plan = query.get("query_plan")
@@ -2783,61 +2937,108 @@ async def ai_chat_stream(req: ChatRequest):
                 if not sql.strip():
                     continue
 
-                # Agentic retry loop
+                # Run SQL in thread pool to avoid blocking
                 result = None
                 for attempt in range(MAX_SQL_RETRIES + 1):
-                    result = execute_hypothesis_sql(sql)
+                    result = await asyncio.to_thread(execute_hypothesis_sql, sql)
                     total_queries += 1
 
-                    # Case 1: SQL error — ask Gemini to fix it
+                    # Case 1: SQL error — ask Gemini to fix
                     if result.get("error") and attempt < MAX_SQL_RETRIES:
-                        yield sse("tool_action", {
+                        await event_queue.put(("tool_action", {
                             "action": "sql_retry",
                             "attempt": attempt + 1,
                             "error": result["error"][:200],
-                            "hypothesis": hypothesis.get("name", ""),
-                        })
+                            "hypothesis": h_name,
+                        }))
                         try:
                             fix = await retry_failed_sql(sql, result["error"])
                             new_sql = fix.get("corrected_sql", "")
                             if new_sql.strip():
                                 sql = new_sql
-                                continue  # retry with corrected SQL
+                                continue
                         except Exception:
                             pass
-                        break  # couldn't get a fix from Gemini
+                        break
 
-                    # Case 2: Empty results — ask Gemini to broaden
+                    # Case 2: Empty results — broaden
                     elif result["row_count"] == 0 and not result.get("error") and attempt == 0:
-                        yield sse("tool_action", {
+                        await event_queue.put(("tool_action", {
                             "action": "sql_broaden",
-                            "hypothesis": hypothesis.get("name", ""),
+                            "hypothesis": h_name,
                             "description": query.get("description", ""),
-                        })
+                            "message": f"No matches for {h_name} — broadening...",
+                        }))
                         try:
                             broader = await broaden_empty_sql(sql, query.get("description", ""))
                             new_sql = broader.get("corrected_sql", "")
                             if new_sql.strip():
                                 sql = new_sql
-                                continue  # retry with broadened SQL
+                                continue
                         except Exception:
                             pass
-                        break  # couldn't broaden
+                        break
 
-                    # Case 3: Success or exhausted retries
                     else:
                         break
 
                 query["result"] = result
                 if result and not result.get("error"):
                     successful_queries += 1
-                    yield sse("query_complete", {
+
+                    # Extract preview features (full geometry) for map highlighting
+                    preview_features = []
+                    for row in result.get("rows", [])[:25]:
+                        geom = row.get("geometry")
+                        if isinstance(geom, dict) and geom.get("type") in ("Polygon", "MultiPolygon"):
+                            # Simplify large polygons for SSE payload size
+                            simplified = _simplify_geom(geom)
+                            preview_features.append(simplified)
+                        elif isinstance(geom, dict) and geom.get("type") == "Point":
+                            # Create a small buffer circle for points (visual area)
+                            preview_features.append(geom)
+
+                    await event_queue.put(("query_complete", {
                         "hypothesis_index": h_idx,
                         "query_index": q_idx,
+                        "hypothesis_name": h_name,
                         "hypothesis_total": len(hypotheses),
                         "row_count": result["row_count"],
                         "description": query.get("description", ""),
-                    })
+                        "preview_features": preview_features,
+                    }))
+
+        # Launch all hypotheses in parallel
+        tasks = [
+            asyncio.create_task(run_hypothesis(i, h))
+            for i, h in enumerate(hypotheses)
+        ]
+
+        # Drain the event queue as results come in, while tasks are running
+        done_tasks = set()
+        while len(done_tasks) < len(tasks):
+            # Check for completed tasks
+            for t in tasks:
+                if t.done() and t not in done_tasks:
+                    done_tasks.add(t)
+
+            # Drain all available events
+            while not event_queue.empty():
+                evt_type, evt_data = event_queue.get_nowait()
+                yield sse(evt_type, evt_data)
+
+            if len(done_tasks) < len(tasks):
+                await asyncio.sleep(0.05)
+
+        # Final drain of any remaining events
+        while not event_queue.empty():
+            evt_type, evt_data = event_queue.get_nowait()
+            yield sse(evt_type, evt_data)
+
+        # Propagate any exceptions from tasks
+        for t in tasks:
+            if t.exception():
+                pass  # Individual hypothesis failures are non-fatal
 
         # Quality check: if too few results, try a fallback hypothesis
         total_rows = sum(
@@ -2884,7 +3085,10 @@ async def ai_chat_stream(req: ChatRequest):
                 pass
 
         # Phase 3: Rank
-        yield sse("status", {"phase": "ranking", "message": "Ranking and visualizing results..."})
+        yield sse("status", {
+            "phase": "ranking",
+            "message": f"Ranking {total_rows} candidate{'s' if total_rows != 1 else ''} by opportunity score...",
+        })
         try:
             evaluation = await evaluate_hypotheses(user_query, hypotheses)
         except Exception as e:
