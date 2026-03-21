@@ -316,6 +316,9 @@ export function MapView() {
         'side_sites-fill',
         'sd_lap_boundaries-fill',
         'sd_planning_register-fill',
+        'osm_buildings-fill',
+        'osm_amenities-fill',
+        'osm_transport-fill',
       ].filter((id) => map.getLayer(id));
 
       const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
@@ -382,6 +385,18 @@ export function MapView() {
         setSelectedType('sd_planning');
         setSelectedProps(props);
         setSelectedSourceId('sd-planning-register');
+      } else if (layerId.startsWith('osm_buildings')) {
+        setSelectedType('osm_building');
+        setSelectedProps(props);
+        setSelectedSourceId('osm-buildings');
+      } else if (layerId.startsWith('osm_amenities')) {
+        setSelectedType('amenity');
+        setSelectedProps(props);
+        setSelectedSourceId('osm-amenities');
+      } else if (layerId.startsWith('osm_transport')) {
+        setSelectedType('transport');
+        setSelectedProps(props);
+        setSelectedSourceId('osm-transport');
       } else {
         setSelectedType('generic');
         setSelectedProps(props);
@@ -400,6 +415,7 @@ export function MapView() {
       'national_planning_polygons-fill', 'national_planning_points-fill',
       'sold_properties-fill', 'census_small_areas-fill', 'rzlt-fill',
       'side_sites-fill', 'sd_lap_boundaries-fill', 'sd_planning_register-fill',
+      'osm_buildings-fill', 'osm_amenities-fill', 'osm_transport-fill',
     ].filter((id) => map.getLayer(id));
     const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
     map.getCanvas().style.cursor = features.length > 0 ? 'pointer' : '';
@@ -780,6 +796,36 @@ export function MapView() {
             type="line"
             filter={selFilter('side-sites')}
             paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+          />
+        </Source>
+
+        {/* === OSM Amenities === */}
+        <Source id="osm-amenities" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="osm_amenities-fill"
+            type="circle"
+            paint={{
+              'circle-radius': 5,
+              'circle-color': '#e91e63',
+              'circle-opacity': 0.7,
+              'circle-stroke-width': 1,
+              'circle-stroke-color': '#ffffff',
+            }}
+          />
+        </Source>
+
+        {/* === OSM Transport === */}
+        <Source id="osm-transport" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="osm_transport-fill"
+            type="circle"
+            paint={{
+              'circle-radius': 6,
+              'circle-color': '#1565c0',
+              'circle-opacity': 0.8,
+              'circle-stroke-width': 1.5,
+              'circle-stroke-color': '#ffffff',
+            }}
           />
         </Source>
 

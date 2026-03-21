@@ -79,6 +79,9 @@ function getMeta(type: string | null): { title: string; icon: string; accent: st
     case 'side_site': return { title: 'Side Site', icon: '◇', accent: '#f9a825' };
     case 'lap': return { title: 'LAP Boundary', icon: '▢', accent: '#9b59b6' };
     case 'sd_planning': return { title: 'SD Planning', icon: '◈', accent: '#e67e22' };
+    case 'osm_building': return { title: 'Building Footprint', icon: '⌂', accent: '#8d6e63' };
+    case 'amenity': return { title: 'Amenity', icon: '◇', accent: '#e91e63' };
+    case 'transport': return { title: 'Transport Stop', icon: '●', accent: '#1565c0' };
     default: return { title: 'Detail', icon: '○', accent: '#3b82f6' };
   }
 }
