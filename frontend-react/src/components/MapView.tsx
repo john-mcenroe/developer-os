@@ -637,6 +637,20 @@ export function MapView() {
           />
         </Source>
 
+        {/* === OSM Buildings === */}
+        <Source id="osm-buildings" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="osm_buildings-fill"
+            type="fill"
+            paint={{ 'fill-color': 'rgba(141, 110, 99, 0.15)', 'fill-outline-color': 'rgba(141, 110, 99, 0)' }}
+          />
+          <Layer
+            id="osm_buildings-outline"
+            type="line"
+            paint={{ 'line-color': '#8d6e63', 'line-width': 0.5 }}
+          />
+        </Source>
+
         {/* === SD LAP Boundaries === */}
         <Source id="sd-lap-boundaries" type="geojson" data={EMPTY_FC}>
           <Layer

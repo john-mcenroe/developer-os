@@ -310,6 +310,68 @@ def get_urban_areas(bbox: str = Query(..., description="west,south,east,north"))
     return JSONResponse({"type": "FeatureCollection", "features": features})
 
 
+@app.get("/api/osm_buildings")
+def get_osm_buildings(bbox: str = Query(..., description="west,south,east,north")):
+    """Return OSM building footprints as GeoJSON within a bounding box."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    osm_id AS id,
+                    building,
+                    name,
+                    addr_housenumber,
+                    addr_street,
+                    addr_city,
+                    building_levels,
+                    amenity,
+                    area_sqm,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM osm_buildings
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 3000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        (
+            osm_id, building, name, addr_housenumber, addr_street,
+            addr_city, building_levels, amenity, area_sqm, geometry,
+        ) = row
+        features.append(
+            {
+                "type": "Feature",
+                "id": osm_id,
+                "geometry": geometry,
+                "properties": {
+                    "id": osm_id,
+                    "building": building,
+                    "name": name,
+                    "addr_housenumber": addr_housenumber,
+                    "addr_street": addr_street,
+                    "addr_city": addr_city,
+                    "building_levels": building_levels,
+                    "amenity": amenity,
+                    "area_sqm": round(area_sqm, 1) if area_sqm else None,
+                },
+            }
+        )
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
 @app.get("/api/census_stats")
 def get_census_stats(
     lng: float = Query(...),
@@ -1391,7 +1453,7 @@ def get_side_sites(
 ALLOWED_TABLES = {
     "sold_properties", "cadastral_freehold", "cadastral_leasehold",
     "rzlt", "dlr_planning_polygons", "dlr_planning_points",
-    "census_small_areas", "urban_areas",
+    "census_small_areas", "urban_areas", "osm_buildings",
 }
 
 SQL_BLOCKLIST = re.compile(
@@ -1571,6 +1633,22 @@ TABLE: urban_areas (Urban area boundary polygons — ~11 Dublin rows, geom is Po
   county TEXT
   geom GEOMETRY(Polygon, 4326)
 
+TABLE: osm_buildings (OpenStreetMap building footprints for Dublin — ~472k rows, geom is Polygon)
+  osm_id BIGINT PRIMARY KEY
+  building TEXT               -- building type: 'house', 'apartments', 'residential', 'yes', 'commercial', 'retail', 'industrial', etc.
+  name TEXT                   -- building name (often NULL)
+  addr_housenumber TEXT       -- house number
+  addr_street TEXT            -- street name
+  addr_city TEXT              -- city name
+  building_levels TEXT        -- number of storeys (as text)
+  amenity TEXT                -- amenity type if applicable (e.g. 'school', 'hospital')
+  area_sqm NUMERIC           -- building footprint area in sqm
+  geom GEOMETRY(Polygon, 4326)
+  -- SPATIAL INDEX on geom. ALWAYS use spatial filter (ST_MakeEnvelope or ST_DWithin) to avoid full table scans on this large table.
+  -- KEY USE: Cross-reference with cadastral parcels to find vacant/undeveloped land (parcels with no building footprint),
+  --   identify building density, detect building types in an area, or find large commercial buildings.
+  -- Common building values: 'yes' (unclassified), 'house', 'apartments', 'residential', 'commercial', 'retail', 'industrial', 'garage', 'shed'
+
 COORDINATE SYSTEMS:
 - All geometries stored in EPSG:4326 (WGS84)
 - For accurate distance/area calculations, use ST_Transform(geom, 2157) (Irish Transverse Mercator)
@@ -1626,13 +1704,13 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
 
 1. GEOMETRY COLUMNS: Every query MUST include these 3 columns:
    - ST_AsGeoJSON(tablename.geom)::json AS geometry
-   - For POLYGON tables (cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons):
+   - For POLYGON tables (cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, osm_buildings, census_small_areas, urban_areas):
        ST_X(ST_Centroid(tablename.geom)) AS lng, ST_Y(ST_Centroid(tablename.geom)) AS lat
    - For POINT tables (sold_properties, dlr_planning_points):
        ST_X(tablename.geom) AS lng, ST_Y(tablename.geom) AS lat
    NOTE: ST_X() and ST_Y() ONLY work on Point geometries. NEVER call ST_X(polygon.geom) — use ST_X(ST_Centroid(polygon.geom)) instead.
 
-2. CADASTRAL TABLES (2M+ rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
+2. LARGE TABLES (cadastral_freehold 2M+ rows, osm_buildings 472k rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
 
 3. LIMIT each query to 25 rows max.
 
@@ -1651,7 +1729,7 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
 10. For cross-table spatial queries, prefer ST_DWithin over ST_Intersects for point-to-polygon distance queries.
 
 11. PRIMARY TABLE TAGGING: Every sql_queries entry MUST include a "primary_table" field set to the main table whose rows are returned.
-    Must be one of: sold_properties, cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, dlr_planning_points, census_small_areas, urban_areas.
+    Must be one of: sold_properties, cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, dlr_planning_points, census_small_areas, urban_areas, osm_buildings.
     For cross-table joins, use the table whose individual rows appear in the output.
 
 HYPOTHESIS GUIDELINES:
@@ -1757,7 +1835,7 @@ After selecting sites, choose the best map visualization type for this data. Add
 
 "object_type": one of:
   - "markers" — ranked numbered pins (DEFAULT for most queries — specific sites, addresses, individual properties)
-  - "polygon_highlights" — colored parcel/zone boundaries (use when primary_table is cadastral_freehold, cadastral_leasehold, rzlt, or dlr_planning_polygons AND geometry column is present in results — lets developer see actual parcel shapes)
+  - "polygon_highlights" — colored parcel/zone boundaries (use when primary_table is cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, or osm_buildings AND geometry column is present in results — lets developer see actual parcel/building shapes)
   - "heatmap" — heat density overlay (use when results are 15+ point observations and the insight is WHERE concentration is highest, e.g. price hotspots, planning activity density)
   - "choropleth" — area polygons colored by metric (use when results are census_small_areas or urban_areas and a single normalized metric like vacancy_rate, apartment_pct, or employment_rate tells the story)
 
@@ -2411,6 +2489,8 @@ def infer_table(row: dict) -> str:
         return "rzlt"
     elif "plan_ref" in row or "decision" in row:
         return "dlr_planning_polygons"
+    elif "osm_id" in row or ("building" in row and "building_levels" in row):
+        return "osm_buildings"
     elif "nationalcadastralreference" in row or ("area_sqm" in row and "address" not in row):
         return "cadastral_freehold"
     return "unknown"
