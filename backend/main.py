@@ -372,6 +372,114 @@ def get_osm_buildings(bbox: str = Query(..., description="west,south,east,north"
     return JSONResponse({"type": "FeatureCollection", "features": features})
 
 
+@app.get("/api/osm_amenities")
+def get_osm_amenities(bbox: str = Query(..., description="west,south,east,north")):
+    """Return OSM amenities as GeoJSON within a bounding box."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    osm_id, amenity, name, addr_street, addr_housenumber,
+                    addr_city, cuisine, healthcare, operator, brand,
+                    opening_hours,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM osm_amenities
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                  AND amenity NOT IN ('parking_space', 'bench', 'waste_basket', 'bicycle_parking')
+                LIMIT 2000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        (osm_id, amenity, name, addr_street, addr_housenumber,
+         addr_city, cuisine, healthcare, operator, brand,
+         opening_hours, geometry) = row
+        features.append({
+            "type": "Feature",
+            "id": osm_id,
+            "geometry": geometry,
+            "properties": {
+                "id": osm_id,
+                "amenity": amenity,
+                "name": name or amenity,
+                "addr_street": addr_street,
+                "addr_housenumber": addr_housenumber,
+                "addr_city": addr_city,
+                "cuisine": cuisine,
+                "healthcare": healthcare,
+                "operator": operator,
+                "brand": brand,
+                "opening_hours": opening_hours,
+            },
+        })
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
+@app.get("/api/osm_transport")
+def get_osm_transport(bbox: str = Query(..., description="west,south,east,north")):
+    """Return OSM transport stops as GeoJSON within a bounding box."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    osm_id, transport_type, name, network, operator,
+                    route_ref, railway, highway,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM osm_transport
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 2000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        (osm_id, transport_type, name, network, operator,
+         route_ref, railway, highway, geometry) = row
+        # Friendly label
+        label = name or transport_type or "Stop"
+        features.append({
+            "type": "Feature",
+            "id": osm_id,
+            "geometry": geometry,
+            "properties": {
+                "id": osm_id,
+                "transport_type": transport_type,
+                "name": label,
+                "network": network,
+                "operator": operator,
+                "route_ref": route_ref,
+                "railway": railway,
+                "highway": highway,
+            },
+        })
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
 @app.get("/api/census_stats")
 def get_census_stats(
     lng: float = Query(...),
@@ -1547,6 +1655,7 @@ ALLOWED_TABLES = {
     "rzlt", "dlr_planning_polygons", "dlr_planning_points",
     "census_small_areas", "urban_areas", "osm_buildings",
     "national_planning_points", "national_planning_polygons",
+    "osm_amenities", "osm_transport",
 }
 
 SQL_BLOCKLIST = re.compile(
@@ -1738,6 +1847,31 @@ TABLE: osm_buildings (OpenStreetMap building footprints for Dublin — ~472k row
   area_sqm NUMERIC           -- building footprint area in sqm
   geom GEOMETRY(Polygon, 4326)
 
+TABLE: osm_amenities (OpenStreetMap points of interest for all of Ireland — ~415k rows, geom is Point)
+  osm_id BIGINT PRIMARY KEY
+  amenity TEXT                -- amenity type: 'school', 'pub', 'restaurant', 'cafe', 'pharmacy', 'fuel', 'hospital', 'parking', 'place_of_worship', 'fast_food', 'post_box', 'community_centre', 'recycling', 'shelter', 'toilets', etc.
+  name TEXT                   -- amenity name
+  addr_street TEXT            -- street name
+  addr_housenumber TEXT       -- house number
+  addr_city TEXT              -- city
+  cuisine TEXT                -- for restaurants/cafes (e.g. 'italian', 'chinese')
+  healthcare TEXT             -- healthcare speciality
+  operator TEXT               -- operating company/org
+  brand TEXT                  -- brand name
+  opening_hours TEXT          -- opening hours
+  geom GEOMETRY(Point, 4326)
+
+TABLE: osm_transport (OpenStreetMap public transport stops for all of Ireland — ~14k rows, geom is Point)
+  osm_id BIGINT PRIMARY KEY
+  transport_type TEXT         -- 'bus_stop', 'station', 'tram_stop', 'halt', 'bus_station', 'ferry_terminal', 'stop_position', 'platform'
+  name TEXT                   -- stop/station name
+  network TEXT                -- transport network (e.g. 'Bus Éireann', 'Dublin Bus', 'Iarnród Éireann')
+  operator TEXT               -- operator
+  route_ref TEXT              -- route reference numbers
+  railway TEXT                -- railway type if applicable
+  highway TEXT                -- highway type if applicable
+  geom GEOMETRY(Point, 4326)
+
 TABLE: national_planning_polygons (national planning applications — ~483k rows, LARGE, geom is MultiPolygon)
   ogc_fid SERIAL PRIMARY KEY
   planningauthority TEXT      -- e.g. 'Dublin City Council', 'Cork County Council'
@@ -1833,7 +1967,7 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
        ST_X(tablename.geom) AS lng, ST_Y(tablename.geom) AS lat
    NOTE: ST_X() and ST_Y() ONLY work on Point geometries. NEVER call ST_X(polygon.geom) — use ST_X(ST_Centroid(polygon.geom)) instead.
 
-2. LARGE TABLES (cadastral_freehold 2M+ rows, osm_buildings 472k rows, national_planning_polygons 483k rows, national_planning_points 362k rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
+2. LARGE TABLES (cadastral_freehold 2M+ rows, osm_buildings 472k rows, osm_amenities 415k rows, national_planning_polygons 483k rows, national_planning_points 362k rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
 
 3. LIMIT each query to 25 rows max.
 
@@ -3251,3 +3385,8 @@ async def ai_chat_stream(req: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

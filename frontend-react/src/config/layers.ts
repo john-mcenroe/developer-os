@@ -148,6 +148,28 @@ export const LAYER_CONFIGS: LayerConfig[] = [
     sourceId: 'census-small-areas',
     group: 'demographics',
   },
+
+  // Points of Interest
+  {
+    id: 'osm_amenities',
+    label: 'Amenities',
+    color: '#e91e63',
+    minZoom: 14,
+    defaultVisible: false,
+    endpoint: '/api/osm_amenities',
+    sourceId: 'osm-amenities',
+    group: 'poi',
+  },
+  {
+    id: 'osm_transport',
+    label: 'Transport Stops',
+    color: '#1565c0',
+    minZoom: 12,
+    defaultVisible: false,
+    endpoint: '/api/osm_transport',
+    sourceId: 'osm-transport',
+    group: 'poi',
+  },
 ];
 
 export const LAYER_GROUPS = {
@@ -155,6 +177,7 @@ export const LAYER_GROUPS = {
   planning: { label: 'Planning', icon: '◈' },
   market: { label: 'Market', icon: '◉' },
   demographics: { label: 'Demographics', icon: '◎' },
+  poi: { label: 'Points of Interest', icon: '◇' },
 };
 
 export const API_BASE = import.meta.env.DEV ? '' : 'http://localhost:8000';
