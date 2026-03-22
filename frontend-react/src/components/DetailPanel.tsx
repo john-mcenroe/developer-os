@@ -84,6 +84,8 @@ function getMeta(type: string | null): { title: string; icon: string; accent: st
     case 'transport': return { title: 'Transport Stop', icon: '●', accent: '#1565c0' };
     case 'flood_zone': return { title: 'Flood Zone', icon: '◬', accent: '#2196f3' };
     case 'niah': return { title: 'Protected Structure', icon: '◆', accent: '#ff9800' };
+    case 'school': return { title: 'School', icon: '▣', accent: '#4caf50' };
+    case 'landuse': return { title: 'Land Use', icon: '▢', accent: '#8bc34a' };
     default: return { title: 'Detail', icon: '○', accent: '#3b82f6' };
   }
 }

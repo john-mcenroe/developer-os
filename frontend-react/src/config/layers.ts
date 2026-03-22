@@ -171,6 +171,30 @@ export const LAYER_CONFIGS: LayerConfig[] = [
     group: 'risk',
   },
 
+  // Education
+  {
+    id: 'schools',
+    label: 'Schools',
+    color: '#4caf50',
+    minZoom: 11,
+    defaultVisible: false,
+    endpoint: '/api/schools',
+    sourceId: 'schools',
+    group: 'poi',
+  },
+
+  // Land Use
+  {
+    id: 'landuse',
+    label: 'Land Use',
+    color: '#8bc34a',
+    minZoom: 12,
+    defaultVisible: false,
+    endpoint: '/api/landuse',
+    sourceId: 'landuse',
+    group: 'boundaries',
+  },
+
   // Points of Interest
   {
     id: 'osm_amenities',

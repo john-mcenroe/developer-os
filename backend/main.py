@@ -586,6 +586,108 @@ def get_niah_buildings(bbox: str = Query(..., description="west,south,east,north
     return JSONResponse({"type": "FeatureCollection", "features": features})
 
 
+@app.get("/api/schools")
+def get_schools(bbox: str = Query(..., description="west,south,east,north")):
+    """Return schools as GeoJSON within a bounding box."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id, roll_number, name, address, county, eircode,
+                    school_type, school_level, deis, ethos, patron,
+                    enrolment, female, male,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM schools
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 2000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        (fid, roll, name, address, county, eircode,
+         stype, level, deis, ethos, patron,
+         enrolment, female, male, geometry) = row
+        features.append({
+            "type": "Feature",
+            "id": fid,
+            "geometry": geometry,
+            "properties": {
+                "id": fid,
+                "roll_number": roll,
+                "name": name,
+                "address": address,
+                "county": county,
+                "eircode": eircode,
+                "school_type": stype,
+                "school_level": level,
+                "deis": deis,
+                "ethos": ethos,
+                "patron": patron,
+                "enrolment": enrolment,
+                "female": female,
+                "male": male,
+            },
+        })
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
+@app.get("/api/landuse")
+def get_landuse(bbox: str = Query(..., description="west,south,east,north")):
+    """Return OSM land use polygons as GeoJSON within a bounding box."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    ogc_fid, osm_id, fclass, name,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM landuse
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 3000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        fid, osm_id, fclass, name, geometry = row
+        features.append({
+            "type": "Feature",
+            "id": fid,
+            "geometry": geometry,
+            "properties": {
+                "id": fid,
+                "osm_id": osm_id,
+                "landuse": fclass,
+                "name": name or fclass,
+            },
+        })
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
 @app.get("/api/census_stats")
 def get_census_stats(
     lng: float = Query(...),
@@ -1763,6 +1865,7 @@ ALLOWED_TABLES = {
     "national_planning_points", "national_planning_polygons",
     "osm_amenities", "osm_transport",
     "flood_zones", "niah_buildings",
+    "schools", "landuse",
 }
 
 SQL_BLOCKLIST = re.compile(
@@ -2009,6 +2112,32 @@ TABLE: niah_buildings (NIAH protected structures — 48,327 buildings across Ire
   -- Protected structures have legal restrictions on alterations/demolition.
   -- Use ST_DWithin to find protected structures near a development site.
 
+TABLE: schools (Department of Education schools — 3,949 schools across Ireland, geom is Point)
+  id SERIAL PRIMARY KEY
+  roll_number TEXT             -- school roll number (unique identifier)
+  name TEXT                    -- school name
+  address TEXT                 -- full address
+  county TEXT                  -- county
+  eircode TEXT                 -- Eircode
+  school_type TEXT             -- e.g. 'Ordinary', 'Special', 'Community', 'Secondary'
+  school_level TEXT            -- 'Primary', 'Post-Primary', 'Special', 'All Through', 'Senior', 'Junior'
+  deis TEXT                    -- DEIS (disadvantaged) status Y/N
+  ethos TEXT                   -- e.g. 'Catholic', 'Church of Ireland', 'Multi-denominational'
+  patron TEXT                  -- school patron
+  enrolment INTEGER            -- total student enrolment
+  female INTEGER               -- female students
+  male INTEGER                 -- male students
+  geom GEOMETRY(Point, 4326)
+  -- Use ST_DWithin to find schools near a site. Key amenity for residential development value.
+
+TABLE: landuse (OpenStreetMap land use polygons — 577,853 polygons for Ireland, LARGE, geom is MultiPolygon)
+  ogc_fid SERIAL PRIMARY KEY
+  osm_id TEXT                  -- OpenStreetMap ID
+  fclass TEXT                  -- land use class: 'residential', 'industrial', 'commercial', 'farmland', 'forest', 'meadow', 'grass', 'farmyard', 'retail', 'park', 'quarry', 'cemetery', 'recreation_ground', 'scrub', 'heath'
+  name TEXT                    -- area name (often NULL)
+  geom GEOMETRY(MultiPolygon, 4326)
+  -- Use ST_Intersects to find what land use a site is currently in. Farmland/meadow near urban areas = conversion opportunity.
+
 TABLE: national_planning_polygons (national planning applications — ~483k rows, LARGE, geom is MultiPolygon)
   ogc_fid SERIAL PRIMARY KEY
   planningauthority TEXT      -- e.g. 'Dublin City Council', 'Cork County Council'
@@ -2104,7 +2233,7 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
        ST_X(tablename.geom) AS lng, ST_Y(tablename.geom) AS lat
    NOTE: ST_X() and ST_Y() ONLY work on Point geometries. NEVER call ST_X(polygon.geom) — use ST_X(ST_Centroid(polygon.geom)) instead.
 
-2. LARGE TABLES (cadastral_freehold 2M+ rows, osm_buildings 472k rows, osm_amenities 415k rows, flood_zones 132k rows, national_planning_polygons 483k rows, national_planning_points 362k rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
+2. LARGE TABLES (cadastral_freehold 2M+ rows, landuse 578k rows, osm_buildings 472k rows, osm_amenities 415k rows, flood_zones 132k rows, national_planning_polygons 483k rows, national_planning_points 362k rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
 
 3. LIMIT each query to 25 rows max.
 
