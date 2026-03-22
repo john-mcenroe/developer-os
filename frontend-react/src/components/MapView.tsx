@@ -321,6 +321,8 @@ export function MapView() {
         'osm_transport-fill',
         'flood_zones-fill',
         'niah_buildings-fill',
+        'schools-fill',
+        'landuse-fill',
       ].filter((id) => map.getLayer(id));
 
       const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
@@ -407,6 +409,14 @@ export function MapView() {
         setSelectedType('niah');
         setSelectedProps(props);
         setSelectedSourceId('niah-buildings');
+      } else if (layerId.startsWith('schools')) {
+        setSelectedType('school');
+        setSelectedProps(props);
+        setSelectedSourceId('schools');
+      } else if (layerId.startsWith('landuse')) {
+        setSelectedType('landuse');
+        setSelectedProps(props);
+        setSelectedSourceId('landuse');
       } else {
         setSelectedType('generic');
         setSelectedProps(props);
@@ -427,6 +437,7 @@ export function MapView() {
       'side_sites-fill', 'sd_lap_boundaries-fill', 'sd_planning_register-fill',
       'osm_buildings-fill', 'osm_amenities-fill', 'osm_transport-fill',
       'flood_zones-fill', 'niah_buildings-fill',
+      'schools-fill', 'landuse-fill',
     ].filter((id) => map.getLayer(id));
     const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
     map.getCanvas().style.cursor = features.length > 0 ? 'pointer' : '';
@@ -807,6 +818,50 @@ export function MapView() {
             type="line"
             filter={selFilter('side-sites')}
             paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+          />
+        </Source>
+
+        {/* === Schools === */}
+        <Source id="schools" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="schools-fill"
+            type="circle"
+            paint={{
+              'circle-radius': 7,
+              'circle-color': '#4caf50',
+              'circle-opacity': 0.85,
+              'circle-stroke-width': 1.5,
+              'circle-stroke-color': '#ffffff',
+            }}
+          />
+        </Source>
+
+        {/* === Land Use === */}
+        <Source id="landuse" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="landuse-fill"
+            type="fill"
+            paint={{
+              'fill-color': [
+                'match', ['get', 'landuse'],
+                'residential', 'rgba(255, 193, 7, 0.2)',
+                'industrial', 'rgba(158, 158, 158, 0.3)',
+                'commercial', 'rgba(233, 30, 99, 0.2)',
+                'retail', 'rgba(156, 39, 176, 0.2)',
+                'farmland', 'rgba(139, 195, 74, 0.2)',
+                'forest', 'rgba(56, 142, 60, 0.25)',
+                'meadow', 'rgba(174, 213, 129, 0.2)',
+                'park', 'rgba(76, 175, 80, 0.2)',
+                'quarry', 'rgba(121, 85, 72, 0.3)',
+                'rgba(139, 195, 74, 0.15)',
+              ],
+              'fill-outline-color': 'rgba(139, 195, 74, 0)',
+            }}
+          />
+          <Layer
+            id="landuse-outline"
+            type="line"
+            paint={{ 'line-color': '#8bc34a', 'line-width': 0.5, 'line-opacity': 0.5 }}
           />
         </Source>
 
