@@ -323,6 +323,7 @@ export function MapView() {
         'niah_buildings-fill',
         'schools-fill',
         'landuse-fill',
+        'zoning-fill',
       ].filter((id) => map.getLayer(id));
 
       const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
@@ -417,6 +418,10 @@ export function MapView() {
         setSelectedType('landuse');
         setSelectedProps(props);
         setSelectedSourceId('landuse');
+      } else if (layerId.startsWith('zoning')) {
+        setSelectedType('zoning');
+        setSelectedProps(props);
+        setSelectedSourceId('zoning');
       } else {
         setSelectedType('generic');
         setSelectedProps(props);
@@ -437,7 +442,7 @@ export function MapView() {
       'side_sites-fill', 'sd_lap_boundaries-fill', 'sd_planning_register-fill',
       'osm_buildings-fill', 'osm_amenities-fill', 'osm_transport-fill',
       'flood_zones-fill', 'niah_buildings-fill',
-      'schools-fill', 'landuse-fill',
+      'schools-fill', 'landuse-fill', 'zoning-fill',
     ].filter((id) => map.getLayer(id));
     const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
     map.getCanvas().style.cursor = features.length > 0 ? 'pointer' : '';
@@ -818,6 +823,23 @@ export function MapView() {
             type="line"
             filter={selFilter('side-sites')}
             paint={{ 'line-color': '#ffffff', 'line-width': 3 }}
+          />
+        </Source>
+
+        {/* === Zoning === */}
+        <Source id="zoning" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="zoning-fill"
+            type="fill"
+            paint={{
+              'fill-color': 'rgba(156, 39, 176, 0.15)',
+              'fill-outline-color': 'rgba(156, 39, 176, 0)',
+            }}
+          />
+          <Layer
+            id="zoning-outline"
+            type="line"
+            paint={{ 'line-color': '#9c27b0', 'line-width': 1.5 }}
           />
         </Source>
 

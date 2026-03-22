@@ -149,6 +149,18 @@ export const LAYER_CONFIGS: LayerConfig[] = [
     group: 'demographics',
   },
 
+  // Zoning
+  {
+    id: 'zoning',
+    label: 'Zoning',
+    color: '#9c27b0',
+    minZoom: 12,
+    defaultVisible: false,
+    endpoint: '/api/zoning',
+    sourceId: 'zoning',
+    group: 'boundaries',
+  },
+
   // Risk & Heritage
   {
     id: 'flood_zones',
