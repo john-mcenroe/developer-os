@@ -586,6 +586,55 @@ def get_niah_buildings(bbox: str = Query(..., description="west,south,east,north
     return JSONResponse({"type": "FeatureCollection", "features": features})
 
 
+@app.get("/api/zoning")
+def get_zoning(bbox: str = Query(..., description="west,south,east,north")):
+    """Return zoning designation polygons as GeoJSON within a bounding box."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id, zone_code, zone_description, gzt_code, gzt_category,
+                    local_authority, hectares,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM zoning
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 3000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        (fid, zone_code, zone_desc, gzt_code, gzt_cat,
+         la, hectares, geometry) = row
+        features.append({
+            "type": "Feature",
+            "id": fid,
+            "geometry": geometry,
+            "properties": {
+                "id": fid,
+                "zone_code": zone_code,
+                "zone_description": zone_desc,
+                "gzt_code": gzt_code,
+                "gzt_category": gzt_cat,
+                "local_authority": la,
+                "hectares": float(hectares) if hectares else None,
+            },
+        })
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
 @app.get("/api/schools")
 def get_schools(bbox: str = Query(..., description="west,south,east,north")):
     """Return schools as GeoJSON within a bounding box."""
@@ -1865,7 +1914,7 @@ ALLOWED_TABLES = {
     "national_planning_points", "national_planning_polygons",
     "osm_amenities", "osm_transport",
     "flood_zones", "niah_buildings",
-    "schools", "landuse",
+    "schools", "landuse", "zoning",
 }
 
 SQL_BLOCKLIST = re.compile(
@@ -2129,6 +2178,19 @@ TABLE: schools (Department of Education schools — 3,949 schools across Ireland
   male INTEGER                 -- male students
   geom GEOMETRY(Point, 4326)
   -- Use ST_DWithin to find schools near a site. Key amenity for residential development value.
+
+TABLE: zoning (Development plan zoning designations — 8,115 polygons for Dublin region, geom is MultiPolygon)
+  id SERIAL PRIMARY KEY
+  zone_code TEXT               -- e.g. 'Objective A', 'RS', 'Z1', 'GE', 'OS', 'GB'
+  zone_description TEXT        -- full description of zoning objective
+  gzt_code TEXT                -- GZT standardised code (e.g. 'R2.6') — DLR only
+  gzt_category TEXT            -- GZT category description — DLR only
+  local_authority TEXT         -- 'DLR', 'Fingal', 'Dublin City'
+  hectares NUMERIC             -- area in hectares (DLR only)
+  geom GEOMETRY(MultiPolygon, 4326)
+  -- Key zoning codes: Residential (Objective A, RS, RA, Z1, Z2), Commercial (Z4, Z5, TC), Industrial (GE, Z6),
+  -- Open Space (Objective F, OS, Z7, Z9), Green Belt (GB), Community (CI, Z15)
+  -- Use ST_Intersects to find what zone a site is in. Critical for development feasibility.
 
 TABLE: landuse (OpenStreetMap land use polygons — 577,853 polygons for Ireland, LARGE, geom is MultiPolygon)
   ogc_fid SERIAL PRIMARY KEY
