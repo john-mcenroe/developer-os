@@ -1907,7 +1907,7 @@ def get_site_enrichment(
                   AND (UPPER(decision) LIKE '%%GRANT%%' OR UPPER(decision) LIKE '%%CONDITIONAL%%')
                   AND to_timestamp(decisiondate/1000) > NOW() - INTERVAL '2 years'
                 """,
-                (*bbox_params, lng, lat, lng, lat, radius),
+                (*bbox_params, lng, lat, radius),
             )
             grant_stats = cur.fetchone()
             grants_summary = None
