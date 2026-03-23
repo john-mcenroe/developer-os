@@ -1680,16 +1680,21 @@ def get_site_enrichment(
     try:
         with conn.cursor() as cur:
             centroid_2157 = "ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 2157)"
+            # Pre-compute a bbox in 4326 for spatial index hits (~0.006° ≈ 500m at Dublin latitude)
+            deg_buf = radius / 111000.0 * 1.2  # rough metres-to-degrees with safety margin
+            bbox_filter = f"geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)"
+            bbox_params = (lng - deg_buf, lat - deg_buf, lng + deg_buf, lat + deg_buf)
 
-            # 1) RZLT overlap
+            # 1) RZLT overlap — bbox pre-filter then exact distance
             cur.execute(
                 f"""
                 SELECT zone_desc, site_area, local_authority_name, zone_gzt
                 FROM rzlt
-                WHERE ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+                WHERE {bbox_filter}
+                  AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
                 LIMIT 5
                 """,
-                (lng, lat, radius),
+                (*bbox_params, lng, lat, radius),
             )
             rzlt_overlap = [
                 {"zone_desc": r[0], "site_area": r[1], "local_authority_name": r[2], "zone_gzt": r[3]}
@@ -1714,7 +1719,7 @@ def get_site_enrichment(
                 (lng, lat, lng, lat, radius),
             )
             planning_queries.extend(cur.fetchall())
-            # National planning
+            # National planning — bbox pre-filter for index hit on 483k row table
             cur.execute(
                 f"""
                 SELECT
@@ -1724,11 +1729,12 @@ def get_site_enrichment(
                     ROUND(ST_Distance(ST_Transform(geom, 2157), {centroid_2157})::numeric, 0) AS distance_m,
                     planningauthority AS source
                 FROM national_planning_polygons
-                WHERE ST_DWithin(ST_Transform(geom, 2157), {centroid_2157}, %s)
+                WHERE {bbox_filter}
+                  AND ST_DWithin(ST_Transform(geom, 2157), {centroid_2157}, %s)
                 ORDER BY distance_m
                 LIMIT 5
                 """,
-                (lng, lat, lng, lat, radius),
+                (*bbox_params, lng, lat, lng, lat, radius),
             )
             planning_queries.extend(cur.fetchall())
             # Combine and sort by distance, take top 8
@@ -1833,15 +1839,16 @@ def get_site_enrichment(
                     "avg_household_size": _f(census_row[11]),
                 }
 
-            # 6) Commercial context
+            # 6) Commercial context — bbox pre-filter for index hit
             cur.execute(
                 f"""
                 SELECT COUNT(*), STRING_AGG(DISTINCT category, ', '),
                        COALESCE(ROUND(AVG(valuation)), 0)
                 FROM commercial_valuations
-                WHERE ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+                WHERE {bbox_filter}
+                  AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
                 """,
-                (lng, lat, radius),
+                (*bbox_params, lng, lat, radius),
             )
             comm_row = cur.fetchone()
             commercial = None
