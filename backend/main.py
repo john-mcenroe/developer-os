@@ -3955,9 +3955,17 @@ def synthesize_title(row: dict, table: str) -> str:
     elif table in ("cadastral_freehold", "cadastral_leasehold"):
         parts.append("Land Parcel")
     elif table in ("national_planning_polygons", "national_planning_points"):
-        parts.append("Planning App")
+        ref = row.get("applicationnumber", "")
+        units = row.get("numresidentialunits")
+        if units and int(units) > 0:
+            parts.append(f"{units}-Unit Scheme ({ref})" if ref else f"{units}-Unit Scheme")
+        elif ref:
+            parts.append(f"Planning {ref}")
+        else:
+            parts.append("Planning App")
     elif table in ("dlr_planning_polygons", "dlr_planning_points"):
-        parts.append("DLR Planning")
+        ref = row.get("plan_ref", "")
+        parts.append(f"DLR {ref}" if ref else "DLR Planning")
     elif table == "osm_buildings":
         btype = row.get("building")
         if btype and btype != "yes":
@@ -4074,8 +4082,15 @@ def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
             tagged_table = None
         row["_table"] = tagged_table if tagged_table in ALLOWED_TABLES else infer_table(row)
 
-        # Synthesize title if AI didn't provide one
-        if title and title.strip() and not title.startswith("Site #"):
+        # Synthesize title if AI didn't provide a good one
+        import re
+        is_generic = (
+            not title
+            or not title.strip()
+            or re.match(r"^Site\s*#?\s*\d*$", title.strip(), re.IGNORECASE)
+            or title.strip().lower() in ("site", "result", "opportunity", "option")
+        )
+        if not is_generic:
             row["_title"] = title
         else:
             row["_title"] = synthesize_title(row, row["_table"])
