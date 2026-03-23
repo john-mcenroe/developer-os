@@ -2585,6 +2585,19 @@ TABLE: national_planning_points (same columns as national_planning_polygons but 
   --   identify building density, detect building types in an area, or find large commercial buildings.
   -- Common building values: 'yes' (unclassified), 'house', 'apartments', 'residential', 'commercial', 'retail', 'industrial', 'garage', 'shed'
 
+DATA COVERAGE:
+- cadastral_freehold, cadastral_leasehold, osm_buildings: Dublin region only (roughly -6.5 to -6.0 lng, 53.2 to 53.5 lat). Areas outside Dublin (e.g. Wicklow, Kildare towns, Meath) will have ZERO cadastral/building data.
+- rzlt: Nationwide but concentrated in urban areas. Some rural areas have 0 RZLT sites.
+- sold_properties: Dublin region + some national coverage.
+- national_planning_polygons/points: Nationwide coverage.
+- commercial_valuations: Dublin region only.
+- census_small_areas: Dublin region only.
+- zoning: Dublin region only (DLR, Fingal, Dublin City).
+- IMPORTANT: If the user asks about a location OUTSIDE Dublin (e.g. Greystones, Delgany, Wicklow, Navan, Drogheda, Galway), many tables will return 0 rows. In this case:
+  * Focus queries on tables with national coverage: national_planning_polygons, national_planning_points, rzlt, sold_properties
+  * Do NOT query cadastral_freehold, osm_buildings, commercial_valuations, census_small_areas, or zoning — they will return nothing
+  * Tell the user in the summary that some data layers are not available outside Dublin
+
 COORDINATE SYSTEMS:
 - All geometries stored in EPSG:4326 (WGS84)
 - For accurate distance/area calculations, use ST_Transform(geom, 2157) (Irish Transverse Mercator)
