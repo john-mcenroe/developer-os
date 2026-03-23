@@ -9,7 +9,7 @@ import MapGL, {
 } from 'react-map-gl/maplibre';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
-import { useMapData, useEnrichedParcel } from '../hooks/useMapData';
+import { useMapData, useEnrichedParcel, useSiteEnrichment } from '../hooks/useMapData';
 import { useSiteSearch } from '../hooks/useSiteSearch';
 import { DUBLIN_CENTER, DEFAULT_ZOOM } from '../config/layers';
 import { LayerPanel } from './LayerPanel';
@@ -76,6 +76,7 @@ export function MapView() {
   const [selectedFeatureId, setSelectedFeatureId] = useState<number | null>(null);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const { data: enrichedData, loading: enrichedLoading, fetchEnriched, clear: clearEnriched } = useEnrichedParcel();
+  const { data: siteEnrichment, loading: siteEnrichmentLoading, fetchEnrichment, clear: clearSiteEnrichment } = useSiteEnrichment();
 
   // AI Site Search
   const siteSearch = useSiteSearch();
@@ -124,21 +125,27 @@ export function MapView() {
       mapRef.current?.flyTo({ center: [result.lng, result.lat], zoom: 16, duration: 1500 });
     }
 
-    // Open detail panel
-    const detailType = TABLE_TO_DETAIL[result._table] || 'generic';
-    setSelectedType(detailType);
+    // Always use 'ai_result' for search results — shows the rich Site Intelligence flyout
+    setSelectedType('ai_result');
     setSelectedProps(result as unknown as Record<string, unknown>);
     setSelectedSourceId(null);
     setSelectedFeatureId(null);
+    clearEnriched();
 
-    // If it's a parcel, fetch enriched data
+    // Fetch site enrichment (planning, sales, census, etc.) for ALL AI results
+    if (result.lng && result.lat) {
+      fetchEnrichment(result.lng, result.lat);
+    } else {
+      clearSiteEnrichment();
+    }
+
+    // Also fetch parcel-specific enrichment if applicable
+    const detailType = TABLE_TO_DETAIL[result._table] || 'generic';
     if ((detailType === 'parcel') && result.id) {
       const parcelType = result._table === 'cadastral_leasehold' ? 'leasehold' : 'freehold';
       fetchEnriched(Number(result.id), parcelType);
-    } else {
-      clearEnriched();
     }
-  }, [fetchEnriched, clearEnriched]);
+  }, [fetchEnriched, clearEnriched, fetchEnrichment, clearSiteEnrichment]);
 
   const siteSearchClear = siteSearch.clear;
   const handleSearchClear = useCallback(() => {
@@ -1302,6 +1309,8 @@ export function MapView() {
         properties={selectedProps}
         enrichedData={enrichedData}
         enrichedLoading={enrichedLoading}
+        siteEnrichment={siteEnrichment}
+        siteEnrichmentLoading={siteEnrichmentLoading}
         onClose={closeDetail}
       />
     </div>

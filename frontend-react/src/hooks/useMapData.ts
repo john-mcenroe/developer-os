@@ -109,6 +109,55 @@ export function useEnrichedParcel() {
   return { data, loading, fetchEnriched, clear };
 }
 
+export interface SiteEnrichment {
+  rzlt_overlap?: Array<{ zone_desc?: string; zone_gzt?: string; site_area?: number }>;
+  zoning?: Array<{ zone_code?: string; zone_description?: string }>;
+  grants_summary?: { total_grants: number; total_units_approved: number; significant_schemes: number };
+  recent_grants?: Array<{
+    ref?: string; description?: string; decision?: string; decision_date?: string;
+    residential_units?: number; floor_area?: number; distance_m?: number;
+    application_type?: string; source?: string;
+  }>;
+  nearby_planning?: Array<{
+    ref?: string; description?: string; decision?: string; date?: string;
+    distance_m?: number; source?: string;
+  }>;
+  nearby_sales?: {
+    count: number; avg_sale_price: number; median_sale_price: number;
+    avg_price_per_sqm?: number;
+    recent?: Array<{ address?: string; sale_price?: number; distance_m?: number }>;
+  };
+  census?: {
+    total_population?: number; population_density?: number;
+    owner_occupied_pct?: number; rented_pct?: number; vacancy_rate?: number;
+    employment_rate?: number; third_level_pct?: number;
+  };
+  commercial?: { count: number; categories?: string; avg_valuation: number };
+}
+
+export function useSiteEnrichment() {
+  const [data, setData] = useState<SiteEnrichment | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const fetchEnrichment = useCallback(async (lng: number, lat: number, radius = 500) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/site/enrich?lng=${lng}&lat=${lat}&radius=${radius}`);
+      if (!res.ok) throw new Error('Failed to fetch site enrichment');
+      const json = await res.json();
+      setData(json);
+    } catch {
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const clear = useCallback(() => setData(null), []);
+
+  return { data, loading, fetchEnrichment, clear };
+}
+
 export function useSearch() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);

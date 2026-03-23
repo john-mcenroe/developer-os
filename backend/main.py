@@ -3317,7 +3317,7 @@ def execute_hypothesis_sql(sql: str) -> dict:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = '10s'")
+            cur.execute("SET statement_timeout = '5s'")
             cur.execute("BEGIN READ ONLY")
             try:
                 cur.execute(wrapped_sql)
@@ -3325,9 +3325,9 @@ def execute_hypothesis_sql(sql: str) -> dict:
                 raw_rows = cur.fetchall()
             except Exception as e:
                 cur.execute("ROLLBACK")
-                cur.execute("RESET statement_timeout")
                 # Try executing without wrapper (some CTEs don't wrap well)
                 try:
+                    cur.execute("SET statement_timeout = '5s'")
                     cur.execute("BEGIN READ ONLY")
                     limited_sql = clean_sql
                     if "LIMIT" not in clean_sql.upper()[-30:]:
