@@ -2668,7 +2668,11 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
        ST_X(tablename.geom) AS lng, ST_Y(tablename.geom) AS lat
    NOTE: ST_X() and ST_Y() ONLY work on Point geometries. NEVER call ST_X(polygon.geom) — use ST_X(ST_Centroid(polygon.geom)) instead.
 
-2. LARGE TABLES (cadastral_freehold 2M+ rows, landuse 578k rows, osm_buildings 472k rows, osm_amenities 415k rows, flood_zones 132k rows, national_planning_polygons 483k rows, national_planning_points 362k rows): ALWAYS include a spatial filter (ST_MakeEnvelope, ST_DWithin, or ST_Intersects with a smaller table). NEVER do a full scan.
+2. LARGE TABLES — ALWAYS bbox-filter FIRST:
+   - national_planning_polygons (483k rows), national_planning_points (362k rows): ALWAYS use `geom && ST_MakeEnvelope(xmin, ymin, xmax, ymax, 4326)` as the FIRST filter. ST_DWithin alone on these tables WILL timeout.
+   - cadastral_freehold (274k rows), osm_buildings (472k rows), rzlt (260k rows): Use ST_Intersects with ST_MakeEnvelope.
+   - When joining large tables (e.g. sites + planning), ALWAYS pre-filter the large table to a bbox in a CTE first, THEN do ST_DWithin on the smaller result set.
+   - NEVER do `ST_DWithin(big_table.geom::geography, point::geography, 500)` without a bbox pre-filter — this forces a full table scan.
 
 3. LIMIT each query to 25 rows max.
 
@@ -2706,25 +2710,33 @@ HYPOTHESIS GUIDELINES:
   At least ONE hypothesis MUST cross-reference sites with nearby planning grants. This is how a developer knows if a site is viable.
 
   PREFERRED PATTERN — sites enriched with nearby planning count:
+  CRITICAL PERFORMANCE RULE: national_planning_polygons has 483k rows. NEVER use ST_DWithin on it without a bbox pre-filter.
+  Always add a bbox filter FIRST, then refine with ST_DWithin on the bbox-filtered subset:
   ```sql
   WITH target_sites AS (
     -- Your main site query (RZLT, cadastral, commercial, etc.)
     SELECT r.*, r.geom
     FROM rzlt r
-    WHERE ST_Intersects(r.geom, ST_MakeEnvelope(...))
+    WHERE ST_Intersects(r.geom, ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}, 4326))
     AND r.site_area > 0.05
     LIMIT 25
+  ),
+  area_planning AS (
+    -- FIRST filter planning to bbox area (fast index scan), THEN spatial join
+    SELECT np.*
+    FROM national_planning_polygons np
+    WHERE np.geom && ST_Expand(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}, 4326), 0.01)
+      AND (UPPER(np.decision) LIKE '%%GRANT%%' OR UPPER(np.decision) LIKE '%%CONDITIONAL%%')
+      AND to_timestamp(np.decisiondate/1000) > NOW() - INTERVAL '3 years'
   ),
   nearby_planning AS (
     SELECT ts.ogc_fid AS site_id,
            COUNT(*) AS nearby_grants,
-           MAX(np.numresidentialunits) AS max_residential_units,
-           STRING_AGG(DISTINCT np.applicationnumber, ', ' ORDER BY np.applicationnumber) AS grant_refs
+           MAX(ap.numresidentialunits) AS max_residential_units,
+           STRING_AGG(DISTINCT ap.applicationnumber, ', ' ORDER BY ap.applicationnumber) AS grant_refs
     FROM target_sites ts
-    JOIN national_planning_polygons np
-      ON ST_DWithin(ts.geom::geography, np.geom::geography, 500)
-    WHERE (UPPER(np.decision) LIKE '%%GRANT%%' OR UPPER(np.decision) LIKE '%%CONDITIONAL%%')
-      AND to_timestamp(np.decisiondate/1000) > NOW() - INTERVAL '3 years'
+    JOIN area_planning ap
+      ON ST_DWithin(ts.geom::geography, ap.geom::geography, 500)
     GROUP BY ts.ogc_fid
   )
   SELECT ts.*,
@@ -2738,13 +2750,13 @@ HYPOTHESIS GUIDELINES:
   ORDER BY COALESCE(npl.nearby_grants, 0) DESC, ts.site_area DESC
   LIMIT 25
   ```
-  This pattern works for ANY primary table — just change the target_sites CTE. The LEFT JOIN means sites without nearby grants still appear (with nearby_grants=0), so the query ALWAYS returns results.
+  The key optimization: `area_planning` CTE uses `&&` bbox operator to pre-filter planning to a small area BEFORE the expensive ST_DWithin geography cast. This is 100x faster.
 
   SIMPLE FALLBACK — if the CTE pattern is too complex, just query planning grants directly:
-  * Query national_planning_polygons for the area with spatial filter + grant decision filter
+  * Query national_planning_polygons with bbox filter: geom && ST_MakeEnvelope(xmin, ymin, xmax, ymax, 4326)
   * Decision filter: UPPER(decision) LIKE '%%GRANT%%' OR UPPER(decision) LIKE '%%CONDITIONAL%%'
   * Date filter: to_timestamp(decisiondate/1000) > NOW() - INTERVAL '3 years'
-  * ALWAYS use bbox spatial filter on national_planning_polygons (483k rows)
+  * ALWAYS use && bbox spatial filter on national_planning_polygons (483k rows — ST_DWithin alone is TOO SLOW)
 
 RESULT QUALITY FILTERS (apply ONLY to cadastral queries in Dublin — do NOT over-filter):
 - For cadastral queries: area_sqm >= 100 to skip road slivers (ONLY when querying cadastral_freehold/leasehold)
@@ -3317,7 +3329,7 @@ def execute_hypothesis_sql(sql: str) -> dict:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = '5s'")
+            cur.execute("SET statement_timeout = '8s'")
             cur.execute("BEGIN READ ONLY")
             try:
                 cur.execute(wrapped_sql)
@@ -3327,7 +3339,7 @@ def execute_hypothesis_sql(sql: str) -> dict:
                 cur.execute("ROLLBACK")
                 # Try executing without wrapper (some CTEs don't wrap well)
                 try:
-                    cur.execute("SET statement_timeout = '5s'")
+                    cur.execute("SET statement_timeout = '8s'")
                     cur.execute("BEGIN READ ONLY")
                     limited_sql = clean_sql
                     if "LIMIT" not in clean_sql.upper()[-30:]:
@@ -3654,7 +3666,7 @@ async def handle_stat_question(messages: list[ChatMessage], map_context: MapCont
     user_query = messages[-1].content if messages else ""
     answer_prompt = f"""The user asked: {user_query}
 
-Query results: {json.dumps(rows[:15], default=str)[:3000]}
+Query results: {json.dumps(rows[:15], default=str)[:6000]}
 
 Write a concise, conversational answer using these results. Include specific numbers.
 If there are key metrics, include them in the stats array.
@@ -3718,7 +3730,7 @@ async def handle_area_comparison(messages: list[ChatMessage], map_context: MapCo
     user_query = messages[-1].content if messages else ""
     comparison_prompt = f"""The user asked: {user_query}
 
-Query results: {json.dumps(all_rows[:30], default=str)[:3000]}
+Query results: {json.dumps(all_rows[:30], default=str)[:6000]}
 
 Write a comparison summary. Highlight which area is stronger and why.
 Structure the comparison data so each area has the same metrics.
@@ -3767,7 +3779,7 @@ async def evaluate_hypotheses(user_query: str, hypotheses: list[dict]) -> dict:
                     summary_row["_row_index"] = row_idx
                     summarized.append(summary_row)
                 parts.append(f"Results ({row_count} rows, row_index 0..{row_count-1}):")
-                parts.append(json.dumps(summarized, indent=2, default=str)[:3000])
+                parts.append(json.dumps(summarized, indent=2, default=str)[:8000])
         parts.append("")
 
     hypothesis_results_text = "\n".join(parts)
@@ -4054,8 +4066,8 @@ def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
         area_sqm = row.get("area_sqm")
         if area_sqm is not None:
             try:
-                if float(area_sqm) < 80:
-                    continue  # Skip tiny cadastral parcels (road slivers)
+                if float(area_sqm) < 20:
+                    continue  # Skip very tiny cadastral parcels (road slivers, boundary artifacts)
             except (ValueError, TypeError):
                 pass
 
@@ -4683,7 +4695,7 @@ async def ai_chat_stream(req: ChatRequest):
         })
         total_queries = 0
         successful_queries = 0
-        MAX_SQL_RETRIES = 2
+        MAX_SQL_RETRIES = 1
 
         # Queue collects SSE events from parallel hypothesis workers
         event_queue: asyncio.Queue = asyncio.Queue()
@@ -4730,9 +4742,19 @@ async def ai_chat_stream(req: ChatRequest):
                     result = await asyncio.to_thread(execute_hypothesis_sql, sql)
                     total_queries += 1
 
-                    # Case 1: SQL error — ask Gemini to fix
+                    # Case 1: SQL error — ask Gemini to fix (but NOT timeouts — those mean the query is too expensive)
                     if result.get("error") and attempt < MAX_SQL_RETRIES:
                         error_snippet = str(result.get("error", ""))[:200]
+                        error_lower = error_snippet.lower()
+                        # Don't retry timeouts or cancellations — the query pattern is fundamentally too expensive
+                        if "timeout" in error_lower or "cancel" in error_lower or "statement timeout" in error_lower:
+                            print(f"[AI] SQL timeout for {h_name} — skipping (not retryable)")
+                            await event_queue.put(("tool_action", {
+                                "action": "sql_skip",
+                                "hypothesis": h_name,
+                                "message": f"Query too complex — skipped",
+                            }))
+                            break
                         print(f"[AI] SQL error (attempt {attempt+1}): {error_snippet}")
                         await event_queue.put(("tool_action", {
                             "action": "sql_retry",
@@ -4900,6 +4922,30 @@ async def ai_chat_stream(req: ChatRequest):
                     hypotheses.append(fallback)
             except Exception:
                 pass
+
+        # Recalculate total rows after any fallback additions
+        total_rows = sum(
+            q.get("result", {}).get("row_count", 0)
+            for h in hypotheses for q in h.get("sql_queries", [])
+            if not q.get("result", {}).get("error")
+        )
+
+        if total_rows == 0:
+            # All hypotheses failed — tell the user clearly
+            yield sse("result", {
+                "type": "map_realization",
+                "title": "No Results Found",
+                "summary": "None of the search strategies found matching sites. This can happen when the area has limited data coverage or the query is too specific. Try a broader area or different criteria.",
+                "sites": [],
+                "follow_ups": [
+                    {"label": "Try broader area", "prompt": f"Find development sites in Dublin"},
+                    {"label": "Search RZLT sites", "prompt": "Show me RZLT sites over 0.5 hectares"},
+                    {"label": "Recent planning grants", "prompt": "Show recent planning grants for apartments"},
+                ],
+                "object_type": "markers",
+                "available_views": ["markers"],
+            })
+            return
 
         # Phase 3: Rank
         yield sse("status", {
