@@ -324,6 +324,7 @@ export function MapView() {
         'schools-fill',
         'landuse-fill',
         'zoning-fill',
+        'commercial_valuations-fill',
       ].filter((id) => map.getLayer(id));
 
       const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
