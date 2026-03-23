@@ -2162,13 +2162,23 @@ function renderEmbeddedMapMessage(data, isHistorical) {
   const resultRowsHtml = results.slice(0, 15).map((r, idx) => {
     const score = r._score || 0;
     const scoreClass = score >= 80 ? "high" : score >= 60 ? "mid" : "low";
-    const title = r.address || r.nationalcadastralreference || r.plan_ref || r.zone_desc || r.sa_urban_area_name || `Site ${idx + 1}`;
-    const meta = r.opportunity_reason || r._table || "";
+    const title = r._title || r.address || r.nationalcadastralreference || r.plan_ref || r.zone_desc || r.sa_urban_area_name || `Site ${idx + 1}`;
+    // Build a compact meta line: area + table badge + truncated reason
+    const metaParts = [];
+    if (r.area_sqm) metaParts.push(`${Number(r.area_sqm).toLocaleString()} m²`);
+    else if (r.site_area && r.site_area > 100) metaParts.push(`${Number(r.site_area).toLocaleString()} m²`);
+    else if (r.site_area) metaParts.push(`${(r.site_area).toFixed(1)} ha`);
+    else if (r.total_floor_area) metaParts.push(`${Number(r.total_floor_area).toLocaleString()} m²`);
+    const tableLabel = r._table === "rzlt" ? "RZLT" : r._table === "cadastral_freehold" ? "Freehold" : r._table === "commercial_valuations" ? "Commercial" : "";
+    if (tableLabel) metaParts.push(tableLabel);
+    const metaLine = metaParts.join(" · ");
+    const reason = r.opportunity_reason ? (r.opportunity_reason.length > 80 ? r.opportunity_reason.substring(0, 80) + "…" : r.opportunity_reason) : "";
     return `<div class="embedded-result-row" data-idx="${idx}">
       <div class="embedded-result-rank">${idx + 1}</div>
       <div class="embedded-result-info">
         <div class="embedded-result-title">${title}</div>
-        <div class="embedded-result-meta">${meta}</div>
+        <div class="embedded-result-meta">${metaLine}</div>
+        ${reason ? `<div class="embedded-result-reason">${reason}</div>` : ""}
       </div>
       <div class="embedded-result-score ${scoreClass}">${score}</div>
     </div>`;
@@ -3290,7 +3300,11 @@ function showAiResults(results) {
       const type = table === "cadastral_freehold" ? "Freehold" : "Leasehold";
       meta.textContent = [type, area, acres].filter(Boolean).join(" · ");
     } else if (table === "rzlt") {
-      const area = result.site_area ? `${Number(result.site_area).toLocaleString()}m²` : "";
+      // site_area may be in sqm (large numbers) or hectares (small numbers)
+      let area = "";
+      if (result.site_area) {
+        area = result.site_area > 100 ? `${Number(result.site_area).toLocaleString()}m²` : `${Number(result.site_area).toFixed(1)}ha`;
+      }
       meta.textContent = [result.local_authority_name, area, "3% annual tax"].filter(Boolean).join(" · ");
     } else if (table === "commercial_valuations") {
       const val = result.valuation ? `Val €${Number(result.valuation).toLocaleString()}` : "";
