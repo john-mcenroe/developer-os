@@ -17,9 +17,7 @@ from db import get_conn, put_conn
 load_dotenv(Path(__file__).parent / ".env")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-# GEMINI_MODEL = "gemini-2.0-flash"  # cheaper, faster — good for testing
-# GEMINI_MODEL = "gemini-3.1-pro-preview"
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 
