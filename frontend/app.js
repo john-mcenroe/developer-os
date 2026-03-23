@@ -3507,10 +3507,14 @@ function selectAiResult(idx, results) {
   }
 
   // Show detail in flyout based on type
-  const table = result._table;
+  // Detect commercial by content if _table tag is wrong
+  const table = (result._table === "unknown" || !result._table) && result.property_number && (result.uses || result.category || result.valuation)
+    ? "commercial_valuations"
+    : result._table;
+  console.log("[AI] selectAiResult table:", table, "_table:", result._table);
   // Always fetch enrichment (includes nearby planning) for all result types
   const enrichmentPromise = (result.lng && result.lat)
-    ? fetchEnrichment(result.lng, result.lat).catch(() => null)
+    ? fetchEnrichment(result.lng, result.lat).catch((e) => { console.warn("[AI] Enrichment fetch failed:", e); return null; })
     : Promise.resolve(null);
 
   if (table === "commercial_valuations") {
@@ -3762,17 +3766,47 @@ function showEnrichedAiResult(result, enrichment) {
   // Section 1.5: Development Feasibility Analysis (based on nearby planning)
   html += buildPlanningAnalysisHTML(enrichment);
 
-  // Section 2: Site-specific properties
-  const skipKeys = new Set(["geometry", "_table", "_rank", "_score", "_title", "_signals", "opportunity_reason", "lng", "lat"]);
+  // Section 2: Site-specific properties (filtered and formatted)
+  const skipKeys = new Set([
+    "geometry", "geom", "_table", "_rank", "_score", "_title", "_signals",
+    "opportunity_reason", "lng", "lat", "ogc_fid", "gml_id", "osm_id",
+    "floor_details",  // handled separately below
+  ]);
   for (const [key, value] of Object.entries(result)) {
     if (skipKeys.has(key) || key.startsWith("_") || value == null || value === "") continue;
+    if (typeof value === "object") continue; // skip geometry/json/array objects
     const label = key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
     let displayVal = value;
     if (typeof value === "number") {
-      displayVal = key.includes("price") || key.includes("sale") || key.includes("valuation") ? `€${value.toLocaleString()}` : value.toLocaleString();
+      if (key.includes("price") || key === "sale_price" || key === "asking_price" || key === "valuation") {
+        displayVal = `€${value.toLocaleString()}`;
+      } else if (key.includes("area") || key === "floor_area_m2" || key === "total_floor_area") {
+        displayVal = `${value.toLocaleString()} m²`;
+      } else if (key === "site_area") {
+        displayVal = value < 1 ? `${(value * 10000).toLocaleString()} m² (${value} ha)` : `${value.toLocaleString()} ha`;
+      } else {
+        displayVal = value.toLocaleString();
+      }
     }
-    if (typeof value === "object") continue; // skip geometry/json objects
     html += `<div class="detail-row"><div class="detail-label">${label}</div><div class="detail-value">${displayVal}</div></div>`;
+  }
+
+  // Floor breakdown (commercial_valuations floor_details JSONB)
+  let floors = result.floor_details;
+  if (typeof floors === "string") {
+    try { floors = JSON.parse(floors); } catch(e) { floors = null; }
+  }
+  if (floors && Array.isArray(floors) && floors.length > 0) {
+    html += `<div class="enrichment-section"><div class="enrichment-section-title">Floor Breakdown</div>`;
+    for (const f of floors) {
+      const navInfo = f.nav_per_m2 ? `€${f.nav_per_m2}/m²` : "";
+      html += `<div class="compact-row">
+        <span class="compact-main">${f.level || "—"}</span>
+        <span class="compact-secondary">${f.floor_use || "—"} · ${f.area ? f.area + "m²" : "—"}</span>
+        <span class="compact-badge">${navInfo}</span>
+      </div>`;
+    }
+    html += `</div>`;
   }
 
   // Section 3: Enrichment (planning, sales, census, commercial)
