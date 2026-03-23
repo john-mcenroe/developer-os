@@ -137,7 +137,8 @@ export function SiteSearch({
   }, [onSearch]);
 
   const hasResults = results.length > 0;
-  const showPanel = (hasResults || isLoading) && expanded;
+  const hasContent = hasResults || !!summary || followUps.length > 0 || !!error;
+  const showPanel = (hasContent || isLoading) && expanded;
 
   return (
     <div className="site-search">
@@ -145,11 +146,11 @@ export function SiteSearch({
       {showPanel && (
         <div className="search-results-panel">
           {/* Header */}
-          {hasResults && (
+          {hasContent && !isLoading && (
             <div className="search-results-header">
               <div className="search-results-title-row">
                 <h3 className="search-results-title">{title}</h3>
-                <span className="search-results-badge">{results.length} sites</span>
+                <span className="search-results-badge">{results.length > 0 ? `${results.length} sites` : 'No matches'}</span>
                 <button
                   className="search-results-toggle"
                   onClick={() => setExpanded(false)}
@@ -254,7 +255,7 @@ export function SiteSearch({
           )}
 
           {/* Follow-ups */}
-          {hasResults && followUps.length > 0 && (
+          {hasContent && followUps.length > 0 && (
             <div className="search-follow-ups">
               {followUps.slice(0, 3).map((f, i) => (
                 <button key={i} className="follow-up-chip" onClick={() => handleFollowUp(f.prompt)}>
@@ -267,7 +268,7 @@ export function SiteSearch({
       )}
 
       {/* Collapsed mini-bar */}
-      {hasResults && !expanded && (
+      {hasContent && !expanded && (
         <button className="search-collapsed-bar" onClick={() => setExpanded(true)}>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <polyline points="6 15 12 9 18 15" />

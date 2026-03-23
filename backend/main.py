@@ -2914,7 +2914,11 @@ async def generate_hypotheses(messages: list[ChatMessage], map_context: MapConte
     if conv_text:
         prompt = prompt + conv_text
     result = await call_gemini_with_prompt(prompt, messages, max_tokens=4096)
-    hypotheses = result.get("hypotheses", [])
+    # Handle both {"hypotheses": [...]} and direct [...] responses
+    if isinstance(result, list):
+        hypotheses = result
+    else:
+        hypotheses = result.get("hypotheses", [])
     if not hypotheses:
         # Fallback: wrap the whole response as a single hypothesis
         hypotheses = [{
@@ -3478,7 +3482,7 @@ Provide a structured analysis in this JSON format:
 Be specific and quantitative. Reference actual numbers from the data. Focus on actionable insights for a property developer."""
 
         try:
-            model = genai.GenerativeModel("gemini-2.0-flash")
+            model = genai.GenerativeModel(GEMINI_MODEL)
             response = model.generate_content(
                 analysis_prompt,
                 generation_config=genai.GenerationConfig(

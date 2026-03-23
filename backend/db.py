@@ -13,7 +13,7 @@ _pool: pool.SimpleConnectionPool | None = None
 def get_pool() -> pool.SimpleConnectionPool:
     global _pool
     if _pool is None:
-        _pool = pool.SimpleConnectionPool(1, 10, DATABASE_URL)
+        _pool = pool.SimpleConnectionPool(2, 30, DATABASE_URL)
     return _pool
 
 
