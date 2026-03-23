@@ -7,16 +7,19 @@ import type {
   RzltProperties,
   SideSiteProperties,
 } from '../types';
+import type { SiteEnrichment } from '../hooks/useMapData';
 
 interface DetailPanelProps {
   type: string | null;
   properties: Record<string, unknown> | null;
   enrichedData: EnrichedParcel | null;
   enrichedLoading: boolean;
+  siteEnrichment?: SiteEnrichment | null;
+  siteEnrichmentLoading?: boolean;
   onClose: () => void;
 }
 
-export function DetailPanel({ type, properties, enrichedData, enrichedLoading, onClose }: DetailPanelProps) {
+export function DetailPanel({ type, properties, enrichedData, enrichedLoading, siteEnrichment, siteEnrichmentLoading, onClose }: DetailPanelProps) {
   const isOpen = type !== null;
 
   useEffect(() => {
@@ -45,7 +48,14 @@ export function DetailPanel({ type, properties, enrichedData, enrichedLoading, o
         </button>
       </div>
       <div className="detail-panel-body">
-        {type === 'parcel' && enrichedData ? (
+        {type === 'ai_result' ? (
+          <AiResultDetail
+            props={properties}
+            enrichment={siteEnrichment ?? null}
+            enrichmentLoading={siteEnrichmentLoading ?? false}
+            enrichedParcel={enrichedData ?? null}
+          />
+        ) : type === 'parcel' && enrichedData ? (
           <EnrichedParcelDetail data={enrichedData} />
         ) : type === 'parcel' && enrichedLoading ? (
           <LoadingSkeleton />
@@ -73,6 +83,7 @@ export function DetailPanel({ type, properties, enrichedData, enrichedLoading, o
 
 function getMeta(type: string | null): { title: string; icon: string; accent: string } {
   switch (type) {
+    case 'ai_result': return { title: 'Site Intelligence', icon: '◬', accent: '#8b5cf6' };
     case 'parcel': return { title: 'Site Intelligence', icon: '◬', accent: '#ff8c00' };
     case 'planning': return { title: 'Planning Application', icon: '◈', accent: '#2ecc71' };
     case 'sold': return { title: 'Property Sale', icon: '◉', accent: '#e74c3c' };
@@ -92,6 +103,327 @@ function getMeta(type: string | null): { title: string; icon: string; accent: st
     case 'commercial': return { title: 'Commercial Property', icon: '◈', accent: '#e91e63' };
     default: return { title: 'Detail', icon: '○', accent: '#3b82f6' };
   }
+}
+
+// ── AI Result Site Intelligence Flyout ──────────────────────────────────────
+
+function AiResultDetail({ props, enrichment, enrichmentLoading, enrichedParcel }: {
+  props: Record<string, unknown>;
+  enrichment: SiteEnrichment | null;
+  enrichmentLoading: boolean;
+  enrichedParcel: EnrichedParcel | null;
+}) {
+  const [planningExpanded, setPlanningExpanded] = useState(false);
+
+  const score = props._score as number | undefined;
+  const reason = props.opportunity_reason as string | undefined;
+  const signals = props._signals as string[] | undefined;
+  const table = props._table as string | undefined;
+  const lng = props.lng as number | undefined;
+  const lat = props.lat as number | undefined;
+
+  const scoreColor = score && score >= 85 ? '#22c55e' : score && score >= 70 ? '#3b82f6' : score && score >= 50 ? '#f59e0b' : '#888';
+  const scoreLabel = score && score >= 85 ? 'Excellent' : score && score >= 70 ? 'Strong' : score && score >= 50 ? 'Moderate' : 'Weak';
+
+  // Build title from result
+  const title = (props._title as string) || (props.address as string) || (props.zone_desc as string) || 'Site';
+
+  // Determine entity badge
+  const badgeMap: Record<string, { label: string; color: string }> = {
+    rzlt: { label: 'RZLT', color: '#ef4444' },
+    cadastral_freehold: { label: 'FREEHOLD', color: '#ff8c00' },
+    cadastral_leasehold: { label: 'LEASEHOLD', color: '#3b82f6' },
+    commercial_valuations: { label: 'COMMERCIAL', color: '#e91e63' },
+    sold_properties: { label: 'SOLD', color: '#e74c3c' },
+    national_planning_polygons: { label: 'PLANNING', color: '#2ecc71' },
+    national_planning_points: { label: 'PLANNING', color: '#2ecc71' },
+    dlr_planning_polygons: { label: 'PLANNING', color: '#2ecc71' },
+    dlr_planning_points: { label: 'PLANNING', color: '#2ecc71' },
+  };
+  const badge = table ? badgeMap[table] : null;
+
+  return (
+    <div className="ai-result-detail">
+      {/* Title + Badge */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <span style={{ fontSize: 15, fontWeight: 600, color: '#e0e0e0', flex: 1 }}>{title}</span>
+          {badge && <span className="entity-badge" style={{ background: badge.color + '20', color: badge.color, border: `1px solid ${badge.color}40`, padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const, whiteSpace: 'nowrap' as const }}>{badge.label}</span>}
+        </div>
+      </div>
+
+      {/* Opportunity Score */}
+      {score != null && (
+        <div style={{ borderLeft: `4px solid ${scoreColor}`, background: scoreColor + '15', padding: '10px 12px', marginBottom: 12, borderRadius: 4 }}>
+          <div style={{ fontSize: 11, textTransform: 'uppercase' as const, color: '#999', letterSpacing: 0.5 }}>Opportunity</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: scoreColor }}>
+            {score}<span style={{ fontSize: 13, color: '#888' }}>/100</span>{' '}
+            <span style={{ fontSize: 12, fontWeight: 400, color: '#999' }}>{scoreLabel}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Signals */}
+      {signals && signals.length > 0 && (
+        <div style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap' as const, gap: 4 }}>
+          {signals.map((s, i) => (
+            <span key={i} style={{ background: '#ffffff10', color: '#aaa', padding: '2px 8px', borderRadius: 4, fontSize: 11 }}>{s}</span>
+          ))}
+        </div>
+      )}
+
+      {/* Opportunity Reason */}
+      {reason && (
+        <div style={{ color: '#c0c0c0', fontSize: 12.5, lineHeight: 1.5, marginBottom: 14, padding: '8px 10px', background: '#ffffff08', borderRadius: 4 }}>{reason}</div>
+      )}
+
+      {/* Visualize links */}
+      {lng && lat && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' as const }}>
+          <a href={`https://www.google.com/maps/@${lat},${lng},18z`} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: '#3b82f6' }}>Google Maps</a>
+          <a href={`https://www.google.com/maps/@${lat},${lng},3a,75y,0h,90t/data=!3m4!1e1!3m2!1s!2e0`} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: '#3b82f6' }}>Street View</a>
+          <a href={`https://geohive.ie/maps/?lat=${lat}&lng=${lng}`} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: '#3b82f6' }}>GeoHive</a>
+        </div>
+      )}
+
+      {/* Site Details */}
+      <SiteDetailsSection props={props} table={table} />
+
+      {/* Enrichment sections */}
+      {enrichmentLoading && <LoadingSkeleton />}
+
+      {enrichment && (
+        <>
+          {/* Development Feasibility (Planning Precedent) */}
+          <PlanningFeasibilitySection enrichment={enrichment} />
+
+          {/* RZLT Status */}
+          {enrichment.rzlt_overlap && enrichment.rzlt_overlap.length > 0 && (
+            <div className="detail-section">
+              <div className="rzlt-alert-banner">RZLT Zone — 3% Annual Tax Applies</div>
+              {enrichment.rzlt_overlap.map((r, i) => (
+                <DetailRow key={i} label="Zone" value={r.zone_desc || r.zone_gzt || '—'} />
+              ))}
+            </div>
+          )}
+
+          {/* Zoning */}
+          {enrichment.zoning && enrichment.zoning.length > 0 && (
+            <div className="detail-section">
+              <div className="detail-section-title">Zoning</div>
+              {enrichment.zoning.map((z, i) => (
+                <DetailRow key={i} label={z.zone_code || '—'} value={z.zone_description || '—'} />
+              ))}
+            </div>
+          )}
+
+          {/* Recent Planning Grants */}
+          <GrantsSection enrichment={enrichment} />
+
+          {/* All Planning Activity (expandable) */}
+          {enrichment.nearby_planning && enrichment.nearby_planning.length > 0 && (
+            <div className="detail-section">
+              <div className="detail-section-title clickable" onClick={() => setPlanningExpanded(!planningExpanded)} style={{ cursor: 'pointer' }}>
+                All Planning Activity ({enrichment.nearby_planning.length} within 500m)
+                <span style={{ marginLeft: 6, fontSize: 10 }}>{planningExpanded ? '▲' : '▼'}</span>
+              </div>
+              {planningExpanded && enrichment.nearby_planning.map((pl, i) => {
+                const decUpper = (pl.decision || '').toUpperCase();
+                const decColor = decUpper.includes('GRANT') || decUpper.includes('CONDITIONAL') ? '#2ecc71' :
+                  decUpper.includes('REFUS') ? '#e74c3c' :
+                  decUpper.includes('WITHDRAW') ? '#888' : '#f59e0b';
+                const decLabel = decUpper.includes('GRANT') && !decUpper.includes('RETENTION') ? 'GRANTED' :
+                  decUpper.includes('CONDITIONAL') ? 'CONDITIONAL' :
+                  decUpper.includes('REFUS') ? 'REFUSED' : (pl.decision || 'Pending').substring(0, 15);
+                return (
+                  <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid #ffffff10' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: 12, color: '#ccc', fontWeight: 500 }}>{pl.ref || '—'}</span>
+                      <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 3, background: decColor + '20', color: decColor, border: `1px solid ${decColor}40` }}>{decLabel}</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>{(pl.description || '—').substring(0, 120)}</div>
+                    <div style={{ fontSize: 10, color: '#666', marginTop: 2 }}>{[pl.date, pl.distance_m != null ? `${pl.distance_m}m` : '', pl.source].filter(Boolean).join(' · ')}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Nearby Sales */}
+          <SalesSection enrichment={enrichment} />
+
+          {/* Demographics */}
+          <AiDemographicsSection enrichment={enrichment} />
+
+          {/* Commercial Context */}
+          {enrichment.commercial && enrichment.commercial.count > 0 && (
+            <div className="detail-section">
+              <div className="detail-section-title">Commercial Activity</div>
+              <DetailRow label="Nearby" value={`${enrichment.commercial.count} properties`} />
+              <DetailRow label="Categories" value={enrichment.commercial.categories || '—'} />
+              <DetailRow label="Avg Valuation" value={`€${enrichment.commercial.avg_valuation.toLocaleString()}`} />
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function SiteDetailsSection({ props, table }: { props: Record<string, unknown>; table?: string }) {
+  const skipKeys = new Set([
+    'geometry', 'geom', '_table', '_rank', '_score', '_title', '_signals',
+    'opportunity_reason', 'lng', 'lat', 'ogc_fid', 'gml_id', 'osm_id', 'floor_details',
+  ]);
+
+  const entries = Object.entries(props).filter(([key, value]) => {
+    if (skipKeys.has(key) || key.startsWith('_')) return false;
+    if (value == null || value === '') return false;
+    if (typeof value === 'object') return false;
+    return true;
+  });
+
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="detail-section">
+      <div className="detail-section-title">Site Details</div>
+      {entries.map(([key, value]) => {
+        const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        let displayVal = String(value);
+        if (typeof value === 'number') {
+          if (key.includes('price') || key === 'sale_price' || key === 'asking_price' || key === 'valuation') {
+            displayVal = `€${value.toLocaleString()}`;
+          } else if (key.includes('area') || key === 'floor_area_m2' || key === 'total_floor_area') {
+            displayVal = `${value.toLocaleString()} m²`;
+          } else {
+            displayVal = value.toLocaleString();
+          }
+        }
+        return <DetailRow key={key} label={label} value={displayVal} />;
+      })}
+    </div>
+  );
+}
+
+function PlanningFeasibilitySection({ enrichment }: { enrichment: SiteEnrichment }) {
+  const gs = enrichment.grants_summary;
+  if (!gs || gs.total_grants === 0) {
+    return (
+      <div className="detail-section">
+        <div className="detail-section-title">Development Feasibility</div>
+        <p style={{ color: '#888', fontSize: 12, fontStyle: 'italic' }}>No planning grants found within 500m in the last 2 years. Planning precedent is unclear — further research recommended.</p>
+      </div>
+    );
+  }
+
+  const unitText = gs.total_units_approved > 0 ? `${gs.total_units_approved.toLocaleString()} residential units approved` : '';
+  const schemeText = gs.significant_schemes > 0 ? `${gs.significant_schemes} major scheme${gs.significant_schemes > 1 ? 's' : ''}` : '';
+
+  return (
+    <div className="detail-section">
+      <div className="detail-section-title">Development Feasibility</div>
+      <div style={{ borderLeft: '3px solid #2ecc71', background: '#2ecc7110', padding: '8px 12px', borderRadius: 4, marginBottom: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: '#2ecc71' }}>
+          {gs.total_grants} Planning Grant{gs.total_grants > 1 ? 's' : ''} Nearby (2yr)
+        </div>
+        <div style={{ fontSize: 11, color: '#aaa', marginTop: 2 }}>
+          {[unitText, schemeText].filter(Boolean).join(' · ') || 'Active planning area'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GrantsSection({ enrichment }: { enrichment: SiteEnrichment }) {
+  const gs = enrichment.grants_summary;
+  const grants = enrichment.recent_grants;
+  if (!gs || gs.total_grants === 0 || !grants || grants.length === 0) return null;
+
+  return (
+    <div className="detail-section">
+      <div className="detail-section-title">Recent Planning Grants</div>
+      {grants.slice(0, 5).map((g, i) => {
+        const desc = g.description ? (g.description.length > 100 ? g.description.substring(0, 100) + '...' : g.description) : '—';
+        const parts = [
+          g.residential_units ? `${g.residential_units} units` : '',
+          g.floor_area ? `${g.floor_area.toLocaleString()}m²` : '',
+          g.distance_m != null ? `${g.distance_m}m` : '',
+        ].filter(Boolean);
+        return (
+          <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid #ffffff10' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: 12, color: '#2ecc71', fontWeight: 500 }}>{g.ref || '—'}</span>
+              <span style={{ fontSize: 10, color: '#888' }}>{parts.join(' · ')}</span>
+            </div>
+            <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>{desc}</div>
+            {g.decision_date && <div style={{ fontSize: 10, color: '#666', marginTop: 2 }}>{g.decision_date}</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SalesSection({ enrichment }: { enrichment: SiteEnrichment }) {
+  const sales = enrichment.nearby_sales;
+  if (!sales || sales.count === 0) return null;
+
+  return (
+    <div className="detail-section">
+      <div className="detail-section-title">Nearby Sales ({sales.count} within 500m)</div>
+      <DetailRow label="Avg Price" value={`€${sales.avg_sale_price.toLocaleString()}`} accent="#e74c3c" />
+      <DetailRow label="Median" value={`€${sales.median_sale_price.toLocaleString()}`} />
+      {sales.avg_price_per_sqm && <DetailRow label="Avg €/m²" value={`€${sales.avg_price_per_sqm.toLocaleString()}/m²`} />}
+      {sales.recent && sales.recent.slice(0, 4).map((s, i) => (
+        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#888', padding: '3px 0' }}>
+          <span>€{s.sale_price?.toLocaleString() || '—'}</span>
+          <span style={{ flex: 1, marginLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{s.address?.substring(0, 30) || '—'}</span>
+          {s.distance_m != null && <span style={{ marginLeft: 6, color: '#666' }}>{s.distance_m}m</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AiDemographicsSection({ enrichment }: { enrichment: SiteEnrichment }) {
+  const c = enrichment.census;
+  if (!c) return null;
+
+  const ownerPct = c.owner_occupied_pct || 0;
+  const rentPct = c.rented_pct || 0;
+
+  return (
+    <div className="detail-section">
+      <div className="detail-section-title">Demographics (Census 2022)</div>
+      {c.total_population && <DetailRow label="Population" value={c.total_population.toLocaleString()} accent="#00bcd4" />}
+      {c.population_density && <DetailRow label="Density" value={`${Math.round(c.population_density).toLocaleString()} / km²`} />}
+      {(ownerPct > 0 || rentPct > 0) && (
+        <div style={{ margin: '6px 0' }}>
+          <div style={{ display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', background: '#333' }}>
+            <div style={{ width: `${ownerPct}%`, background: '#2ecc71' }} />
+            <div style={{ width: `${rentPct}%`, background: '#3b82f6' }} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#888', marginTop: 3 }}>
+            <span>Owner {ownerPct}%</span>
+            <span>Rented {rentPct}%</span>
+          </div>
+        </div>
+      )}
+      {c.vacancy_rate != null && <DetailRow label="Vacancy" value={`${c.vacancy_rate}%`} accent={c.vacancy_rate > 10 ? '#e74c3c' : c.vacancy_rate > 5 ? '#f59e0b' : '#2ecc71'} />}
+      {c.employment_rate != null && <DetailRow label="Employment" value={`${c.employment_rate}%`} />}
+      {c.third_level_pct != null && <DetailRow label="3rd Level Edu" value={`${c.third_level_pct}%`} />}
+    </div>
+  );
+}
+
+function DetailRow({ label, value, accent }: { label: string; value: string; accent?: string }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 12 }}>
+      <span style={{ color: '#888' }}>{label}</span>
+      <span style={{ color: accent || '#ccc', fontWeight: accent ? 600 : 400, textAlign: 'right' as const, maxWidth: '60%' }}>{value}</span>
+    </div>
+  );
 }
 
 function LoadingSkeleton() {

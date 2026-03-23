@@ -1343,6 +1343,27 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 20px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  transition: all 0.3s ease;
+}
+
+/* Hero state: larger, more prominent when no results */
+.site-search-bar--hero {
+  padding: 14px 20px;
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(139, 92, 246, 0.15), 0 0 40px rgba(139, 92, 246, 0.08);
+  border-radius: 24px;
+}
+
+.site-search-bar--hero .site-search-input {
+  font-size: 16px;
+}
+
+.site-search-bar--hero .site-search-icon {
+  color: #a78bfa;
+}
+
+.site-search-bar--hero .site-search-input::placeholder {
+  color: rgba(167, 139, 250, 0.5);
 }
 
 .site-search-icon {
@@ -1656,56 +1677,7 @@ body {
 }
 
 /* Starter prompts */
-.search-starters {
-  background: rgba(15, 15, 20, 0.95);
-  border-radius: 12px 12px 0 0;
-  padding: 12px 14px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-bottom: none;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-height: 280px;
-  overflow-y: auto;
-}
-
-.search-starter-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.search-starter-label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  color: rgba(255, 255, 255, 0.3);
-}
-
-.search-starter-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.search-starter-chip {
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  padding: 6px 12px;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.7);
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-}
-
-.search-starter-chip:hover {
-  background: rgba(59, 130, 246, 0.15);
-  border-color: rgba(59, 130, 246, 0.3);
-  color: #93c5fd;
-}
+/* Starter chips removed — search bar is now the primary affordance */
 
 /* Score */
 .sri-score {
