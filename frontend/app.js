@@ -3233,34 +3233,52 @@ function showAiResults(results) {
     const meta = document.createElement("div");
     meta.className = "ai-result-meta";
 
-    // Format based on table type
+    // AI-generated title takes priority, then table-specific fallbacks
     const table = result._table;
-    if (table === "sold_properties") {
+    const aiTitle = result._title;
+
+    if (aiTitle) {
+      title.textContent = aiTitle;
+    } else if (table === "sold_properties") {
       title.textContent = result.address || "Unknown Address";
+    } else if (table === "cadastral_freehold" || table === "cadastral_leasehold") {
+      title.textContent = result.nationalcadastralreference || result.national_ref || `Parcel #${result.ogc_fid || result.id || ""}`;
+    } else if (table === "rzlt") {
+      title.textContent = result.zone_desc || "RZLT Site";
+    } else if (table === "commercial_valuations") {
+      title.textContent = result.address || result.uses || "Commercial Property";
+    } else if (table === "dlr_planning_polygons" || table === "dlr_planning_points") {
+      title.textContent = result.plan_ref || "Planning App";
+    } else {
+      title.textContent = result.address || result.nationalcadastralreference || result.plan_ref || result.zone_desc || `Site #${idx + 1}`;
+    }
+
+    // Table-specific meta line
+    if (table === "sold_properties") {
       const price = result.sale_price ? `€${Number(result.sale_price).toLocaleString()}` : "—";
       const area = result.floor_area_m2 ? `${result.floor_area_m2}m²` : "";
       const beds = result.beds ? `${result.beds}bed` : "";
       meta.textContent = [price, result.property_type, area, beds].filter(Boolean).join(" · ");
     } else if (table === "cadastral_freehold" || table === "cadastral_leasehold") {
-      title.textContent = result.nationalcadastralreference || result.national_ref || result.inspire_id || `Parcel #${result.ogc_fid || result.id || ""}`;
       const area = result.area_sqm ? `${Number(result.area_sqm).toLocaleString()}m²` : "";
       const acres = result.area_sqm ? `(${(result.area_sqm / 4046.86).toFixed(2)}ac)` : "";
       const type = table === "cadastral_freehold" ? "Freehold" : "Leasehold";
       meta.textContent = [type, area, acres].filter(Boolean).join(" · ");
     } else if (table === "rzlt") {
-      title.textContent = result.zone_desc || "RZLT Site";
       const area = result.site_area ? `${Number(result.site_area).toLocaleString()}m²` : "";
       meta.textContent = [result.local_authority_name, area, "3% annual tax"].filter(Boolean).join(" · ");
+    } else if (table === "commercial_valuations") {
+      const val = result.valuation ? `Val €${Number(result.valuation).toLocaleString()}` : "";
+      const area = result.total_floor_area ? `${Number(result.total_floor_area).toLocaleString()}m²` : "";
+      meta.textContent = [result.category, result.uses, area, val].filter(Boolean).join(" · ");
     } else if (table === "dlr_planning_polygons" || table === "dlr_planning_points") {
-      title.textContent = result.plan_ref || "Planning App";
       meta.textContent = [result.decision, result.location].filter(Boolean).join(" · ");
     } else {
-      // Generic fallback for unknown table types
-      title.textContent = result.address || result.nationalcadastralreference || result.plan_ref || result.zone_desc || `Site #${idx + 1}`;
       const metaParts = [];
       if (result.sale_price) metaParts.push(`€${Number(result.sale_price).toLocaleString()}`);
       if (result.area_sqm) metaParts.push(`${Number(result.area_sqm).toLocaleString()}m²`);
       if (result.site_area) metaParts.push(`${Number(result.site_area).toLocaleString()}m²`);
+      if (result.total_floor_area) metaParts.push(`${Number(result.total_floor_area).toLocaleString()}m²`);
       if (result.property_type) metaParts.push(result.property_type);
       if (result.decision) metaParts.push(result.decision);
       meta.textContent = metaParts.join(" · ") || `${result.lat?.toFixed(4)}, ${result.lng?.toFixed(4)}`;
@@ -3279,6 +3297,19 @@ function showAiResults(results) {
       info.appendChild(reason);
     }
 
+    // Signal badges
+    if (result._signals && result._signals.length > 0) {
+      const signalsRow = document.createElement("div");
+      signalsRow.className = "ai-result-signals";
+      result._signals.forEach(sig => {
+        const sigBadge = document.createElement("span");
+        sigBadge.className = "signal-badge";
+        sigBadge.textContent = sig;
+        signalsRow.appendChild(sigBadge);
+      });
+      info.appendChild(signalsRow);
+    }
+
     // Badge
     const badge = document.createElement("div");
     badge.className = "ai-result-badge";
@@ -3291,6 +3322,9 @@ function showAiResults(results) {
     } else if (table === "rzlt") {
       badge.classList.add("rzlt");
       badge.textContent = "RZLT";
+    } else if (table === "commercial_valuations") {
+      badge.classList.add("commercial");
+      badge.textContent = "COMMERCIAL";
     } else if (table === "dlr_planning_polygons" || table === "dlr_planning_points") {
       badge.classList.add("planning");
       badge.textContent = result.decision ? result.decision.substring(0, 6) : "Plan";
@@ -3384,6 +3418,7 @@ function selectAiResult(idx, results) {
   // Show detail in flyout based on type
   const table = result._table;
   if (table === "sold_properties") {
+    // Sold properties: show existing flyout + fetch enrichment for context
     showSoldFlyout(result);
   } else if (table === "cadastral_freehold" || table === "cadastral_leasehold") {
     const parcelId = result.ogc_fid || result.id;
@@ -3391,21 +3426,213 @@ function selectAiResult(idx, results) {
     fetch(`${API}/parcel/${parcelId}/enriched?parcel_type=${pType}`)
       .then((r) => r.json())
       .then((data) => showEnrichedParcelFlyout(data))
-      .catch(() => showParcelFlyout({
-        id: parcelId,
-        national_ref: result.nationalcadastralreference || result.national_ref,
-        inspire_id: result.gml_id || result.inspire_id,
-        area_sqm: result.area_sqm,
-        area_acres: result.area_sqm ? +(result.area_sqm / 4046.86).toFixed(3) : null,
-        type: pType,
-      }));
+      .catch(() => showEnrichedAiResult(result, null));
+  } else if (table === "commercial_valuations") {
+    // Commercial: dedicated flyout with floor breakdown
+    fetchEnrichment(result.lng, result.lat)
+      .then(enrichment => showCommercialFlyout(result, enrichment))
+      .catch(() => showCommercialFlyout(result, null));
   } else if (table === "rzlt") {
-    showRzltFlyout(result);
+    // RZLT: fetch enrichment for planning/sales context
+    fetchEnrichment(result.lng, result.lat)
+      .then(enrichment => showEnrichedAiResult(result, enrichment))
+      .catch(() => showEnrichedAiResult(result, null));
   } else if (table === "dlr_planning_polygons" || table === "dlr_planning_points") {
     showPlanningFlyout(result);
   } else {
-    showGenericFlyout(result);
+    // All other types: universal enriched flyout
+    if (result.lng && result.lat) {
+      fetchEnrichment(result.lng, result.lat)
+        .then(enrichment => showEnrichedAiResult(result, enrichment))
+        .catch(() => showEnrichedAiResult(result, null));
+    } else {
+      showEnrichedAiResult(result, null);
+    }
   }
+}
+
+// ── Enrichment helpers ────────────────────────────────────────────────────────
+
+async function fetchEnrichment(lng, lat, radius = 500) {
+  const resp = await fetch(`${API}/site/enrich?lng=${lng}&lat=${lat}&radius=${radius}`);
+  if (!resp.ok) return null;
+  return resp.json();
+}
+
+function buildEnrichmentHTML(enrichment) {
+  if (!enrichment) return "";
+  let html = "";
+
+  // RZLT overlap
+  if (enrichment.rzlt_overlap && enrichment.rzlt_overlap.length > 0) {
+    html += `<div class="enrichment-section">
+      <div class="rzlt-alert">RZLT Zone — 3% annual tax applies</div>`;
+    for (const r of enrichment.rzlt_overlap) {
+      html += `<div class="detail-row"><div class="detail-label">Zone</div><div class="detail-value">${r.zone_desc || "—"}</div></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Zoning
+  if (enrichment.zoning && enrichment.zoning.length > 0) {
+    html += `<div class="enrichment-section"><div class="enrichment-section-title">Zoning</div>`;
+    for (const z of enrichment.zoning) {
+      html += `<div class="detail-row"><div class="detail-label">${z.zone_code || "—"}</div><div class="detail-value">${z.zone_description || "—"}</div></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Nearby planning
+  if (enrichment.nearby_planning && enrichment.nearby_planning.length > 0) {
+    html += `<div class="enrichment-section"><div class="enrichment-section-title">Planning Precedent <span class="enrichment-subtitle">(within 500m)</span></div>`;
+    for (const pl of enrichment.nearby_planning.slice(0, 5)) {
+      const desc = pl.description ? (pl.description.length > 50 ? pl.description.substring(0, 50) + "…" : pl.description) : "—";
+      const decision = pl.decision || "—";
+      const decColor = decision.toUpperCase().includes("GRANT") ? "#2ecc71" :
+                        decision.toUpperCase().includes("REFUS") ? "#e74c3c" : "#f59e0b";
+      const dist = pl.distance_m != null ? `${pl.distance_m}m` : "";
+      html += `<div class="compact-row">
+        <span class="compact-main" style="color:${decColor}">${pl.ref || "—"}</span>
+        <span class="compact-secondary">${desc}</span>
+        <span class="compact-badge">${dist}</span>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Nearby sales
+  const sales = enrichment.nearby_sales;
+  if (sales && sales.count > 0) {
+    html += `<div class="enrichment-section">
+      <div class="enrichment-section-title">Nearby Sales <span class="enrichment-subtitle">(${sales.count} within 500m)</span></div>
+      <div class="detail-row"><div class="detail-label">Avg Price</div><div class="detail-value large" style="color:#e74c3c">€${sales.avg_sale_price.toLocaleString()}</div></div>
+      <div class="detail-row"><div class="detail-label">Median</div><div class="detail-value">€${sales.median_sale_price.toLocaleString()}</div></div>
+      <div class="detail-row"><div class="detail-label">Avg €/m²</div><div class="detail-value">${sales.avg_price_per_sqm ? "€" + sales.avg_price_per_sqm.toLocaleString() + "/m²" : "—"}</div></div>`;
+    if (sales.recent && sales.recent.length > 0) {
+      html += `<div class="compact-list-header">Recent Sales</div>`;
+      for (const s of sales.recent.slice(0, 3)) {
+        const addr = s.address ? (s.address.length > 35 ? s.address.substring(0, 35) + "…" : s.address) : "—";
+        const dist = s.distance_m != null ? `${s.distance_m}m` : "";
+        html += `<div class="compact-row">
+          <span class="compact-main">€${s.sale_price ? s.sale_price.toLocaleString() : "—"}</span>
+          <span class="compact-secondary">${addr}</span>
+          <span class="compact-badge">${dist}</span>
+        </div>`;
+      }
+    }
+    html += `</div>`;
+  }
+
+  // Census
+  const c = enrichment.census;
+  if (c) {
+    html += `<div class="enrichment-section"><div class="enrichment-section-title">Demographics</div>
+      <div class="detail-row"><div class="detail-label">Population</div><div class="detail-value">${c.total_population || "—"}</div></div>
+      <div class="detail-row"><div class="detail-label">Density</div><div class="detail-value">${c.population_density ? Math.round(c.population_density) + "/km²" : "—"}</div></div>
+      <div class="detail-row"><div class="detail-label">Vacancy</div><div class="detail-value" style="color:${(c.vacancy_rate||0) > 10 ? '#e74c3c' : (c.vacancy_rate||0) > 5 ? '#f59e0b' : '#2ecc71'}">${c.vacancy_rate != null ? c.vacancy_rate + "%" : "—"}</div></div>
+      <div class="detail-row"><div class="detail-label">Owner Occ.</div><div class="detail-value">${c.owner_occupied_pct != null ? c.owner_occupied_pct + "%" : "—"}</div></div>
+      <div class="detail-row"><div class="detail-label">3rd Level Ed.</div><div class="detail-value">${c.third_level_pct != null ? c.third_level_pct + "%" : "—"}</div></div>
+    </div>`;
+  }
+
+  // Commercial context
+  if (enrichment.commercial) {
+    html += `<div class="enrichment-section"><div class="enrichment-section-title">Commercial Activity</div>
+      <div class="detail-row"><div class="detail-label">Nearby</div><div class="detail-value">${enrichment.commercial.count} properties</div></div>
+      <div class="detail-row"><div class="detail-label">Categories</div><div class="detail-value" style="font-size:11px">${enrichment.commercial.categories || "—"}</div></div>
+      <div class="detail-row"><div class="detail-label">Avg Valuation</div><div class="detail-value">€${enrichment.commercial.avg_valuation.toLocaleString()}</div></div>
+    </div>`;
+  }
+
+  return html;
+}
+
+function showEnrichedAiResult(result, enrichment) {
+  let html = "";
+
+  // Section 1: Score + Reason + Signals
+  if (result._score) {
+    const scoreColor = result._score >= 80 ? "#22c55e" : result._score >= 60 ? "#f59e0b" : "#888";
+    html += `<div class="detail-row"><div class="detail-label">Opportunity Score</div><div class="detail-value large" style="color:${scoreColor}">${result._score}/100</div></div>`;
+  }
+  if (result.opportunity_reason) {
+    html += `<div class="detail-row"><div class="detail-label">Why</div><div class="detail-value" style="color:#22c55e;font-size:12px;line-height:1.4">${result.opportunity_reason}</div></div>`;
+  }
+  if (result._signals && result._signals.length) {
+    html += `<div class="detail-row"><div class="detail-label">Signals</div><div class="detail-value">${result._signals.map(s => `<span class="signal-badge">${s}</span>`).join(" ")}</div></div>`;
+  }
+  html += "<hr>";
+
+  // Section 2: Site-specific properties
+  const skipKeys = new Set(["geometry", "_table", "_rank", "_score", "_title", "_signals", "opportunity_reason", "lng", "lat"]);
+  for (const [key, value] of Object.entries(result)) {
+    if (skipKeys.has(key) || key.startsWith("_") || value == null || value === "") continue;
+    const label = key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    let displayVal = value;
+    if (typeof value === "number") {
+      displayVal = key.includes("price") || key.includes("sale") || key.includes("valuation") ? `€${value.toLocaleString()}` : value.toLocaleString();
+    }
+    if (typeof value === "object") continue; // skip geometry/json objects
+    html += `<div class="detail-row"><div class="detail-label">${label}</div><div class="detail-value">${displayVal}</div></div>`;
+  }
+
+  // Section 3: Enrichment
+  html += buildEnrichmentHTML(enrichment);
+
+  flyoutContent.innerHTML = html;
+  openFlyout(result._title || "Site Detail");
+}
+
+function showCommercialFlyout(result, enrichment) {
+  let html = "";
+
+  // Score + Reason + Signals
+  if (result._score) {
+    const scoreColor = result._score >= 80 ? "#22c55e" : result._score >= 60 ? "#f59e0b" : "#888";
+    html += `<div class="detail-row"><div class="detail-label">Opportunity Score</div><div class="detail-value large" style="color:${scoreColor}">${result._score}/100</div></div>`;
+  }
+  if (result.opportunity_reason) {
+    html += `<div class="detail-row"><div class="detail-label">Why</div><div class="detail-value" style="color:#22c55e;font-size:12px;line-height:1.4">${result.opportunity_reason}</div></div>`;
+  }
+  if (result._signals && result._signals.length) {
+    html += `<div class="detail-row"><div class="detail-label">Signals</div><div class="detail-value">${result._signals.map(s => `<span class="signal-badge">${s}</span>`).join(" ")}</div></div>`;
+  }
+  html += "<hr>";
+
+  // Commercial basics
+  html += `<div class="enrichment-section-title">Property Details</div>`;
+  if (result.address) html += `<div class="detail-row"><div class="detail-label">Address</div><div class="detail-value">${result.address}</div></div>`;
+  if (result.category) html += `<div class="detail-row"><div class="detail-label">Category</div><div class="detail-value">${result.category}</div></div>`;
+  if (result.uses) html += `<div class="detail-row"><div class="detail-label">Current Use</div><div class="detail-value" style="color:#f59e0b">${result.uses}</div></div>`;
+  if (result.valuation) html += `<div class="detail-row"><div class="detail-label">Valuation</div><div class="detail-value large">€${Number(result.valuation).toLocaleString()}</div></div>`;
+  if (result.total_floor_area) html += `<div class="detail-row"><div class="detail-label">Total Floor Area</div><div class="detail-value">${Number(result.total_floor_area).toLocaleString()} m²</div></div>`;
+  if (result.eircode) html += `<div class="detail-row"><div class="detail-label">Eircode</div><div class="detail-value">${result.eircode}</div></div>`;
+  if (result.local_authority) html += `<div class="detail-row"><div class="detail-label">Local Authority</div><div class="detail-value">${result.local_authority}</div></div>`;
+  if (result.car_park) html += `<div class="detail-row"><div class="detail-label">Car Park Spaces</div><div class="detail-value">${result.car_park}</div></div>`;
+
+  // Floor breakdown from floor_details JSONB
+  let floors = result.floor_details;
+  if (typeof floors === "string") {
+    try { floors = JSON.parse(floors); } catch(e) { floors = null; }
+  }
+  if (floors && Array.isArray(floors) && floors.length > 0) {
+    html += `<div class="enrichment-section"><div class="enrichment-section-title">Floor Breakdown</div>`;
+    for (const f of floors) {
+      const navInfo = f.nav_per_m2 ? `€${f.nav_per_m2}/m²` : "";
+      html += `<div class="compact-row">
+        <span class="compact-main">${f.level || "—"}</span>
+        <span class="compact-secondary">${f.floor_use || "—"} · ${f.area ? f.area + "m²" : "—"}</span>
+        <span class="compact-badge">${navInfo}</span>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Enrichment sections
+  html += buildEnrichmentHTML(enrichment);
+
+  flyoutContent.innerHTML = html;
+  openFlyout(result._title || "Commercial Property");
 }
 
 function clearAiMarkers() {
