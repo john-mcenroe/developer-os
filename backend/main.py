@@ -2704,11 +2704,48 @@ HYPOTHESIS GUIDELINES:
   * Undervalued commercial (low valuation relative to floor area) = redevelopment potential
   * Multiple commercial uses on one site (e.g. office + restaurant) = complex site with conversion potential
   * Commercial sites near recent residential planning grants = proven change-of-use precedent
-- PLANNING PRECEDENT: Include one hypothesis querying recent planning grants. But keep it SIMPLE — a standalone query on national_planning_polygons is better than a complex cross-table join that returns 0 rows.
-  * Simple approach (PREFERRED): Query national_planning_polygons directly for the area with spatial filter + grant decision filter. This always returns results if there are grants.
-  * Cross-reference approach (ONLY if simple queries succeed): Join RZLT/cadastral with planning grants within 500m.
+- PLANNING PRECEDENT — CRITICAL FOR EVERY SEARCH:
+  At least ONE hypothesis MUST cross-reference sites with nearby planning grants. This is how a developer knows if a site is viable.
+
+  PREFERRED PATTERN — sites enriched with nearby planning count:
+  ```sql
+  WITH target_sites AS (
+    -- Your main site query (RZLT, cadastral, commercial, etc.)
+    SELECT r.*, r.geom
+    FROM rzlt r
+    WHERE ST_Intersects(r.geom, ST_MakeEnvelope(...))
+    AND r.site_area > 0.05
+    LIMIT 25
+  ),
+  nearby_planning AS (
+    SELECT ts.ogc_fid AS site_id,
+           COUNT(*) AS nearby_grants,
+           MAX(np.numresidentialunits) AS max_residential_units,
+           STRING_AGG(DISTINCT np.applicationnumber, ', ' ORDER BY np.applicationnumber) AS grant_refs
+    FROM target_sites ts
+    JOIN national_planning_polygons np
+      ON ST_DWithin(ts.geom::geography, np.geom::geography, 500)
+    WHERE (UPPER(np.decision) LIKE '%%GRANT%%' OR UPPER(np.decision) LIKE '%%CONDITIONAL%%')
+      AND to_timestamp(np.decisiondate/1000) > NOW() - INTERVAL '3 years'
+    GROUP BY ts.ogc_fid
+  )
+  SELECT ts.*,
+         COALESCE(npl.nearby_grants, 0) AS nearby_grants,
+         npl.max_residential_units,
+         npl.grant_refs,
+         ST_AsGeoJSON(ts.geom)::json AS geometry,
+         ST_X(ST_Centroid(ts.geom)) AS lng, ST_Y(ST_Centroid(ts.geom)) AS lat
+  FROM target_sites ts
+  LEFT JOIN nearby_planning npl ON ts.ogc_fid = npl.site_id
+  ORDER BY COALESCE(npl.nearby_grants, 0) DESC, ts.site_area DESC
+  LIMIT 25
+  ```
+  This pattern works for ANY primary table — just change the target_sites CTE. The LEFT JOIN means sites without nearby grants still appear (with nearby_grants=0), so the query ALWAYS returns results.
+
+  SIMPLE FALLBACK — if the CTE pattern is too complex, just query planning grants directly:
+  * Query national_planning_polygons for the area with spatial filter + grant decision filter
   * Decision filter: UPPER(decision) LIKE '%%GRANT%%' OR UPPER(decision) LIKE '%%CONDITIONAL%%'
-  * Date filter: to_timestamp(decisiondate/1000) > NOW() - INTERVAL '2 years'
+  * Date filter: to_timestamp(decisiondate/1000) > NOW() - INTERVAL '3 years'
   * ALWAYS use bbox spatial filter on national_planning_polygons (483k rows)
 
 RESULT QUALITY FILTERS (apply ONLY to cadastral queries in Dublin — do NOT over-filter):
@@ -2789,8 +2826,13 @@ Here are the query results from different analytical angles:
 YOUR TASK: Pick the BEST 8-15 sites across ALL queries and rank them. The developer just wants to see the top opportunities on a map — no theory, no hypotheses, just results.
 
 RANKING CRITERIA (in order of importance):
-1. Planning precedent — sites near RECENT (last 2 years) granted planning permissions for residential development score MUCH higher. A site with 3+ residential grants within 500m is proven territory. Include grant ref numbers and unit counts in your reason.
-2. Actionability — can a developer actually do something with this site? RZLT sites (motivated seller), vacant land, and underused commercial properties are most actionable.
+1. Planning precedent — THE MOST IMPORTANT SIGNAL. Look for these columns in the data:
+   - "nearby_grants": count of granted planning permissions within 500m (higher = better, 3+ is excellent)
+   - "max_residential_units": largest residential scheme nearby (indicates scale of development the area supports)
+   - "grant_refs": actual planning reference numbers (cite these in your reason!)
+   - Sites with nearby_grants >= 3 score 80+. Sites with nearby_grants = 0 lose 15-20 points.
+   - If planning data isn't in the results, don't penalize — but sites WITH planning data should always rank above those without.
+2. Actionability — can a developer actually do something with this site? RZLT sites (motivated seller due to 3% annual tax), vacant land, and underused commercial properties are most actionable.
 3. Signal strength — does the data clearly show an opportunity (underpriced, large parcel, RZLT pressure, nearby grants, etc.)? Multiple overlapping signals = higher score.
 4. Cross-reference value — sites that appear in multiple queries or combine multiple signals rank higher. A site that is RZLT + near grants + underpriced is exceptional.
 5. Specificity — a specific site with an address beats an aggregated statistic.
