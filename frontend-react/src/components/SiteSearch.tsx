@@ -277,30 +277,8 @@ export function SiteSearch({
         </button>
       )}
 
-      {/* Starter prompts when idle */}
-      {!hasResults && !isLoading && !query && (
-        <div className="search-starters">
-          {STARTER_CATEGORIES.map((cat) => (
-            <div key={cat.category} className="search-starter-group">
-              <span className="search-starter-label">{cat.category}</span>
-              <div className="search-starter-chips">
-                {cat.prompts.map((p) => (
-                  <button
-                    key={p.label}
-                    className="search-starter-chip"
-                    onClick={() => { setQuery(p.prompt); setExpanded(true); onSearch(p.prompt); }}
-                  >
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Search Bar (always at bottom) */}
-      <form className="site-search-bar" onSubmit={handleSubmit}>
+      {/* Search Bar — prominent when idle, compact when results shown */}
+      <form className={`site-search-bar ${!hasResults && !isLoading && !query ? 'site-search-bar--hero' : ''}`} onSubmit={handleSubmit}>
         <div className="site-search-icon">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M12 2L2 7l10 5 10-5-10-5z" />
