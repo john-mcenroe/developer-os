@@ -2956,18 +2956,48 @@ async def call_gemini_with_prompt(system_prompt: str, messages: list, max_tokens
         )
 
     if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Gemini API error: {resp.status_code}")
+        error_detail = ""
+        try:
+            error_detail = resp.json().get("error", {}).get("message", resp.text[:200])
+        except Exception:
+            error_detail = resp.text[:200]
+        raise HTTPException(status_code=502, detail=f"Gemini API error {resp.status_code}: {error_detail}")
 
     data = resp.json()
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
+
+    # Safely extract text from Gemini response — handle all malformed shapes
+    try:
+        candidates = data.get("candidates", [])
+        if not candidates:
+            # Gemini may return promptFeedback instead of candidates (safety filter)
+            feedback = data.get("promptFeedback", {})
+            block_reason = feedback.get("blockReason", "unknown")
+            return {"error": f"Gemini blocked response: {block_reason}"}
+        text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        if not text:
+            finish = candidates[0].get("finishReason", "unknown")
+            return {"error": f"Gemini returned empty response (finishReason: {finish})"}
+    except (IndexError, TypeError, AttributeError) as e:
+        return {"error": f"Gemini response parsing failed: {e}"}
 
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        # Try to extract JSON from markdown code blocks or mixed text
+        match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+        # Try raw JSON extraction
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match:
-            return json.loads(match.group())
-        return {}
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+        return {"error": f"Failed to parse Gemini JSON: {text[:200]}"}
 
 
 def validate_sql(sql: str) -> str | None:
@@ -3235,19 +3265,49 @@ async def generate_hypotheses(messages: list[ChatMessage], map_context: MapConte
     if conv_text:
         prompt = prompt + conv_text
     result = await call_gemini_with_prompt(prompt, messages, max_tokens=4096)
+
+    # Check for Gemini error responses
+    if isinstance(result, dict) and result.get("error"):
+        raise Exception(f"Hypothesis generation failed: {result['error']}")
+
     # Handle both {"hypotheses": [...]} and direct [...] responses
     if isinstance(result, list):
         hypotheses = result
     else:
         hypotheses = result.get("hypotheses", [])
-    if not hypotheses:
-        # Fallback: wrap the whole response as a single hypothesis
-        hypotheses = [{
+
+    # Validate and normalize each hypothesis — ensure required fields exist
+    valid_hypotheses = []
+    for i, h in enumerate(hypotheses):
+        if not isinstance(h, dict):
+            continue
+        # Ensure required fields with safe defaults
+        h.setdefault("name", f"Hypothesis {i+1}")
+        h.setdefault("rationale", "")
+        h.setdefault("sql_queries", [])
+        # Validate sql_queries is a list of dicts
+        if not isinstance(h["sql_queries"], list):
+            h["sql_queries"] = []
+        for q in h["sql_queries"]:
+            if isinstance(q, dict):
+                q.setdefault("description", "")
+                q.setdefault("primary_table", "unknown")
+        valid_hypotheses.append(h)
+
+    if not valid_hypotheses:
+        # Fallback: create a broad search hypothesis
+        user_query = ""
+        for msg in reversed(messages):
+            if msg.role == "user":
+                user_query = msg.content
+                break
+        valid_hypotheses = [{
             "name": "General exploration",
-            "rationale": "Broad search based on the user's query",
+            "rationale": f"Broad search for: {user_query[:100]}",
             "sql_queries": [],
         }]
-    return hypotheses
+
+    return valid_hypotheses
 
 
 # ── Agentic Loop: Retry, Broaden, Fallback ───────────────────────────────────
@@ -3435,8 +3495,10 @@ async def evaluate_hypotheses(user_query: str, hypotheses: list[dict]) -> dict:
     # Build the hypothesis results summary for the evaluation prompt
     parts = []
     for i, h in enumerate(hypotheses):
-        parts.append(f"## Analysis {i} (hypothesis_index={i}): {h['name']}")
-        parts.append(f"Rationale: {h['rationale']}")
+        h_name = h.get("name", f"Hypothesis {i+1}")
+        h_rationale = h.get("rationale", "No rationale provided")
+        parts.append(f"## Analysis {i} (hypothesis_index={i}): {h_name}")
+        parts.append(f"Rationale: {h_rationale}")
         for j, q in enumerate(h.get("sql_queries", [])):
             result = q.get("result", {})
             row_count = result.get("row_count", 0)
@@ -3466,6 +3528,30 @@ async def evaluate_hypotheses(user_query: str, hypotheses: list[dict]) -> dict:
 
     eval_messages = [{"role": "user", "content": "Rank the best sites from these results."}]
     result = await call_gemini_with_prompt(eval_prompt, eval_messages, max_tokens=4096)
+
+    # Handle Gemini error responses gracefully
+    if isinstance(result, dict) and result.get("error"):
+        # Return a minimal valid evaluation so downstream code doesn't crash
+        return {
+            "type": "explore",
+            "title": "Analysis Results",
+            "summary": f"AI ranking encountered an issue: {result['error']}. Showing best available results.",
+            "sites": [],
+            "follow_ups": [],
+            "object_type": "markers",
+            "available_views": ["markers"],
+        }
+
+    # Ensure required fields exist with defaults
+    if not isinstance(result, dict):
+        result = {}
+    result.setdefault("type", "explore")
+    result.setdefault("title", "Analysis Results")
+    result.setdefault("summary", "Analysis complete.")
+    result.setdefault("sites", [])
+    result.setdefault("follow_ups", [])
+    result.setdefault("object_type", "markers")
+    result.setdefault("available_views", ["markers"])
 
     return result
 
@@ -3500,15 +3586,18 @@ def extract_coords_from_geometry(row: dict):
     coords = geom.get("coordinates")
     if not coords:
         return
-    if geom_type == "Point":
-        row["lng"] = coords[0]
-        row["lat"] = coords[1]
-    elif geom_type in ("Polygon", "MultiPolygon"):
-        # Use centroid approximation: average of first ring
-        ring = coords[0] if geom_type == "Polygon" else coords[0][0]
-        if ring:
-            row["lng"] = sum(c[0] for c in ring) / len(ring)
-            row["lat"] = sum(c[1] for c in ring) / len(ring)
+    try:
+        if geom_type == "Point" and len(coords) >= 2:
+            row["lng"] = coords[0]
+            row["lat"] = coords[1]
+        elif geom_type in ("Polygon", "MultiPolygon"):
+            # Use centroid approximation: average of first ring
+            ring = coords[0] if geom_type == "Polygon" else coords[0][0]
+            if ring and len(ring) > 0:
+                row["lng"] = sum(c[0] for c in ring) / len(ring)
+                row["lat"] = sum(c[1] for c in ring) / len(ring)
+    except (IndexError, TypeError, ZeroDivisionError):
+        pass  # Malformed geometry — skip coord extraction
 
 
 def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
@@ -3574,6 +3663,9 @@ def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
                     row["_table"] = q.get("primary_table") if q.get("primary_table") in ALLOWED_TABLES else infer_table(row)
                     row["_rank"] = len(results)
                     row["_score"] = 50  # default for fallback
+                    row["_title"] = ""  # no AI title for fallback results
+                    row["_signals"] = []
+                    row["opportunity_reason"] = q.get("description", h.get("name", ""))
                     results.append(row)
                     if len(results) >= 15:
                         break
@@ -3609,7 +3701,7 @@ def determine_object_type(evaluation: dict, results: list[dict]) -> tuple[str, l
     if obj_type == "choropleth":
         has_poly = any(
             isinstance(r.get("geometry"), dict)
-            and r["geometry"].get("type") in ("Polygon", "MultiPolygon")
+            and (r.get("geometry") or {}).get("type") in ("Polygon", "MultiPolygon")
             for r in results
         )
         if not has_poly:
@@ -3924,11 +4016,25 @@ async def ai_chat(req: ChatRequest):
                     successful_queries += 1
 
     # Phase 3: Evaluate results and rank best sites
-    evaluation = await evaluate_hypotheses(user_query, hypotheses)
+    try:
+        evaluation = await evaluate_hypotheses(user_query, hypotheses)
+    except Exception as e:
+        evaluation = {
+            "title": "Analysis Results",
+            "summary": f"Ranking encountered an issue ({e}), showing available results.",
+            "sites": [], "follow_ups": [],
+            "object_type": "markers", "available_views": ["markers"],
+        }
 
     # Build the flat results array with geometry for the frontend map
-    results = build_flat_results(hypotheses, evaluation)
-    obj_type, available_views, choropleth_metric, heatmap_weight_col = determine_object_type(evaluation, results)
+    try:
+        results = build_flat_results(hypotheses, evaluation)
+    except Exception:
+        results = []
+    try:
+        obj_type, available_views, choropleth_metric, heatmap_weight_col = determine_object_type(evaluation, results)
+    except Exception:
+        obj_type, available_views, choropleth_metric, heatmap_weight_col = "markers", ["markers"], None, None
 
     # Return clean response
     return {
@@ -4319,11 +4425,24 @@ async def ai_chat_stream(req: ChatRequest):
         try:
             evaluation = await evaluate_hypotheses(user_query, hypotheses)
         except Exception as e:
-            yield sse("error", {"message": f"Failed to rank results: {e}"})
-            yield sse("done", {})
-            return
-        results = build_flat_results(hypotheses, evaluation)
-        obj_type, available_views, choropleth_metric, heatmap_weight_col = determine_object_type(evaluation, results)
+            # Don't crash — create a minimal evaluation and try to show raw results
+            evaluation = {
+                "type": "explore",
+                "title": "Analysis Results",
+                "summary": f"Ranking encountered an issue, showing available results. ({e})",
+                "sites": [],
+                "follow_ups": [],
+                "object_type": "markers",
+                "available_views": ["markers"],
+            }
+        try:
+            results = build_flat_results(hypotheses, evaluation)
+        except Exception:
+            results = []
+        try:
+            obj_type, available_views, choropleth_metric, heatmap_weight_col = determine_object_type(evaluation, results)
+        except Exception:
+            obj_type, available_views, choropleth_metric, heatmap_weight_col = "markers", ["markers"], None, None
 
         yield sse("result", {
             "type": "map_realization",
