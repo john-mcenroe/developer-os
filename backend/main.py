@@ -2393,7 +2393,7 @@ CRITICAL SQL RULES (FOLLOW EXACTLY — violations cause runtime errors):
 10. For cross-table spatial queries, prefer ST_DWithin over ST_Intersects for point-to-polygon distance queries.
 
 11. PRIMARY TABLE TAGGING: Every sql_queries entry MUST include a "primary_table" field set to the main table whose rows are returned.
-    Must be one of: sold_properties, cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, dlr_planning_points, census_small_areas, urban_areas, osm_buildings, national_planning_points, national_planning_polygons.
+    Must be one of: sold_properties, cadastral_freehold, cadastral_leasehold, rzlt, dlr_planning_polygons, dlr_planning_points, census_small_areas, urban_areas, osm_buildings, national_planning_points, national_planning_polygons, commercial_valuations.
     For cross-table joins, use the table whose individual rows appear in the output.
 
 HYPOTHESIS GUIDELINES:
@@ -2403,6 +2403,13 @@ HYPOTHESIS GUIDELINES:
 - Hypotheses should be specific and testable, not vague
 - If no location is specified, pick 2-3 promising Dublin areas or search city-wide
 - For side site / infill / gap site queries, use the SIDE SITE DETECTION PATTERNS above — combine shape analysis (compactness), size filtering, adjacency, planning history, and RZLT overlap
+
+RESULT QUALITY FILTERS (apply in SQL WHERE clauses):
+- For RESIDENTIAL site queries on cadastral tables: always add area_sqm >= 150 (minimum viable residential plot)
+- For any cadastral query: add area_sqm >= 100 to filter out road slivers and infrastructure strips
+- To exclude elongated road parcels, add a compactness filter: 4 * PI() * ST_Area(ST_Transform(geom, 2157)) / NULLIF(POWER(ST_Perimeter(ST_Transform(geom, 2157)), 2), 0) > 0.05
+- For commercial_valuations queries: always SELECT floor_details, valuation, uses, category, total_floor_area — these are critical for developer assessment
+- When querying commercial_valuations for change-of-use opportunities, cross-reference with nearby planning grants (national_planning_polygons with decision LIKE '%Grant%') within 500m to find precedent
 
 QUERY PLAN OPTION (use for simple single-table queries):
 For straightforward single-table queries with filters, you may use a structured "query_plan" instead of raw SQL.
@@ -2473,7 +2480,9 @@ RESPONSE FORMAT (valid JSON only, no markdown):
       "query_index": 0,
       "row_index": 0,
       "score": 85,
-      "reason": "One sentence: why this site is an opportunity."
+      "title": "2,060sqm Infill Plot, Clondalkin",
+      "reason": "2-3 sentences citing specific data signals.",
+      "signals": ["RZLT pressure", "Below market price"]
     }}
   ],
   "follow_ups": [
@@ -2490,9 +2499,34 @@ RULES:
 - ONLY select rows that have actual site data (geometry, address, or parcel ref). Skip aggregate-only rows.
 - Skip rows from queries that returned errors.
 - "score" is 0-100 representing opportunity strength: 90+ = exceptional, 70-89 = strong, 50-69 = moderate, below 50 = weak. Score based on: size of opportunity, data confidence, actionability.
-- "reason" should be developer-actionable: mention price, area, tax pressure, planning status etc.
 - "follow_ups" should have exactly 3 entries.
 - If no queries returned useful results, set sites to [] and explain in summary what the developer should try instead.
+
+TITLE RULES:
+- "title" is a short descriptive label (max 8 words) for the site. Include size, type/use, and location/area name.
+- Good examples: "2,060sqm Infill Plot, Clondalkin", "Commercial Corner Site, Castleknock", "Underpriced 3-bed Semi, Drumcondra", "319sqm Office/Restaurant, Old Navan Rd", "Large RZLT Site, Sandyford"
+- NEVER use raw cadastral reference codes (like "DN-123456") or generic labels like "Site #1" or "Site #7"
+- NEVER repeat the full raw address — distill it to a recognisable location name
+- For commercial_valuations: mention current use and floor area (e.g. "416sqm Warehouse, Clondalkin")
+- For cadastral parcels: mention area and character (e.g. "692sqm Residential Plot, Castleknock")
+
+REASON RULES:
+- "reason" must be 2-3 sentences citing SPECIFIC data from the query results.
+- MUST mention concrete numbers: price/sqm vs area average, RZLT tax liability, nearby planning grant ref numbers, vacancy rates, floor area compared to peers.
+- For commercial sites: mention current use, total floor area, valuation, and WHY change-of-use or redevelopment makes sense (nearby residential pricing, planning precedent, area demographics).
+- Bad: "Good site for development." Good: "319sqm office/restaurant site valued at €X with floor area well above local retail average. 3 residential planning grants within 500m suggest strong change-of-use precedent. Area vacancy rate of 8% indicates demand."
+
+SIGNAL RULES:
+- "signals" is an array of 1-4 short tags (max 4 words each) that justify the score.
+- Examples: "RZLT pressure", "Below market price/sqm", "Adjacent planning grant", "High vacancy area", "Large underused parcel", "Change of use potential", "Near transport hub", "Infill opportunity", "Corner site", "Multiple frontages"
+
+SITE FILTERING — REJECT these (do NOT include in sites array):
+- Road strips, motorway parcels, and infrastructure land (typically very elongated with area < 200sqm)
+- Parcels smaller than 100sqm for any query
+- For residential queries: parcels smaller than 150sqm (not viable for a dwelling)
+- Aggregate-only or statistics rows without a specific site location
+- Clearly non-developable land: public roads, river banks, railway corridors, electricity substations
+- Sites where the data clearly shows they are already fully developed with no redevelopment signal
 
 VISUALIZATION SELECTION:
 After selecting sites, choose the best map visualization type for this data. Add these fields to your JSON:
@@ -3161,6 +3195,8 @@ def infer_table(row: dict) -> str:
         return "dlr_planning_polygons"
     elif "osm_id" in row or ("building" in row and "building_levels" in row):
         return "osm_buildings"
+    elif "property_number" in row and ("uses" in row or "category" in row or "valuation" in row):
+        return "commercial_valuations"
     elif "nationalcadastralreference" in row or ("area_sqm" in row and "address" not in row):
         return "cadastral_freehold"
     return "unknown"
@@ -3216,8 +3252,19 @@ def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
         if not row.get("lng") and not row.get("lat"):
             continue
 
+        # Post-processing filter: reject non-buildable results
+        area_val = row.get("area_sqm") or row.get("site_area")
+        if area_val is not None:
+            try:
+                if float(area_val) < 100:
+                    continue  # Skip tiny parcels (road slivers, etc.)
+            except (ValueError, TypeError):
+                pass
+
         row["opportunity_reason"] = reason
         row["_score"] = score
+        row["_title"] = pick.get("title", "")
+        row["_signals"] = pick.get("signals", [])
         # Use tagged primary_table from Phase 1, fall back to inference
         try:
             tagged_table = hypotheses[h_idx]["sql_queries"][q_idx].get("primary_table")
