@@ -3336,29 +3336,60 @@ def execute_hypothesis_sql(sql: str) -> dict:
     return {"rows": rows, "error": None, "row_count": len(rows)}
 
 
-def format_map_context(ctx: MapContext | None) -> str:
-    """Format the user's current map state for injection into AI prompts."""
+def query_references_visible_area(query: str) -> bool:
+    """Check if the user's query explicitly references the current map view."""
+    VIEW_PHRASES = [
+        "around here", "in this area", "what i can see", "on screen",
+        "visible", "current view", "this view", "nearby", "on the map",
+        "in view", "showing", "what's here", "this neighbourhood",
+        "this neighborhood", "right here", "where i am",
+    ]
+    q = query.lower().strip()
+    return any(phrase in q for phrase in VIEW_PHRASES)
+
+
+def format_map_context(ctx: MapContext | None, user_query: str = "") -> str:
+    """Format the user's current map state for injection into AI prompts.
+
+    IMPORTANT: Map context is only included when the user's query explicitly
+    references the visible area (e.g. 'around here', 'nearby', 'what I can see').
+    For named locations (e.g. 'sites near Lucan'), the map viewport is IGNORED
+    to prevent confusing the LLM with irrelevant bounding boxes.
+    """
     if not ctx:
         return ""
+
+    # Only include viewport/spatial context if user references the visible area
+    include_spatial = query_references_visible_area(user_query)
+
+    # Circle analysis is always relevant (user explicitly drew it)
+    has_circle = ctx.circle_analysis and ctx.circle_analysis.get("center")
+    # Selected entity is always relevant (user explicitly clicked it)
+    has_selection = ctx.selected_entity and ctx.selected_entity.get("id")
+
+    if not include_spatial and not has_circle and not has_selection:
+        # No map context needed — the query specifies its own location
+        return ""
+
     parts = ["\nMAP CONTEXT (user's current view):"]
-    if ctx.viewport:
+    if include_spatial and ctx.viewport:
         sw = ctx.viewport.get("sw", [])
         ne = ctx.viewport.get("ne", [])
         if len(sw) == 2 and len(ne) == 2:
             parts.append(f"- Viewport: SW({sw[0]:.4f}, {sw[1]:.4f}) to NE({ne[0]:.4f}, {ne[1]:.4f})")
-    if ctx.zoom is not None:
+            parts.append("- The user is referring to THIS visible area. Use ST_MakeEnvelope with these bounds as the spatial filter.")
+    if include_spatial and ctx.zoom is not None:
         parts.append(f"- Zoom level: {ctx.zoom}")
     if ctx.active_layers:
         parts.append(f"- Active layers: {', '.join(ctx.active_layers)}")
-    if ctx.circle_analysis:
+    if has_circle:
         c = ctx.circle_analysis
         center = c.get("center", [])
         if len(center) == 2:
             parts.append(f"- Circle analysis active: center ({center[0]:.4f}, {center[1]:.4f}), radius {c.get('radius_m', 0)}m")
-    if ctx.selected_entity:
+            parts.append("- Use this circle as the spatial filter.")
+    if has_selection:
         parts.append(f"- Selected entity: {ctx.selected_entity.get('table')} id={ctx.selected_entity.get('id')}")
-    parts.append("- Use viewport bounds as ST_MakeEnvelope spatial filter when the user's query is location-relative (e.g. 'around here', 'in this area', 'nearby', 'what I can see').")
-    parts.append("- If the user specifies a named location (e.g. 'Rathmines', 'Blackrock'), use that instead of viewport bounds.")
     return "\n".join(parts)
 
 
@@ -3405,7 +3436,13 @@ def format_conversation_context(ctx: ConversationContext | None) -> str:
 async def generate_hypotheses(messages: list[ChatMessage], map_context: MapContext | None = None, conv_context: ConversationContext | None = None) -> list[dict]:
     """Phase 1: Ask Gemini to form hypotheses and write SQL."""
     prompt = HYPOTHESIS_PROMPT
-    context_text = format_map_context(map_context)
+    # Extract user query to decide whether map context is relevant
+    _uq = ""
+    for _m in reversed(messages):
+        if _m.role == "user":
+            _uq = _m.content
+            break
+    context_text = format_map_context(map_context, _uq)
     conv_text = format_conversation_context(conv_context)
     if context_text:
         prompt = prompt + context_text
@@ -3547,7 +3584,12 @@ async def handle_clarification(messages: list[ChatMessage]) -> dict:
 async def handle_stat_question(messages: list[ChatMessage], map_context: MapContext | None = None, conv_context: ConversationContext | None = None) -> dict:
     """Handle factual/statistical questions with a single query + conversational answer."""
     prompt = STAT_QUESTION_PROMPT_TEMPLATE.format(db_schema=DB_SCHEMA_PROMPT)
-    context_text = format_map_context(map_context)
+    _uq = ""
+    for _m in reversed(messages):
+        if _m.role == "user":
+            _uq = _m.content
+            break
+    context_text = format_map_context(map_context, _uq)
     conv_text = format_conversation_context(conv_context)
     if context_text:
         prompt += context_text
@@ -3597,7 +3639,12 @@ RESPONSE FORMAT (valid JSON only):
 async def handle_area_comparison(messages: list[ChatMessage], map_context: MapContext | None = None, conv_context: ConversationContext | None = None) -> dict:
     """Handle area-vs-area comparison queries."""
     prompt = AREA_COMPARISON_PROMPT_TEMPLATE.format(db_schema=DB_SCHEMA_PROMPT)
-    context_text = format_map_context(map_context)
+    _uq = ""
+    for _m in reversed(messages):
+        if _m.role == "user":
+            _uq = _m.content
+            break
+    context_text = format_map_context(map_context, _uq)
     conv_text = format_conversation_context(conv_context)
     if context_text:
         prompt += context_text
