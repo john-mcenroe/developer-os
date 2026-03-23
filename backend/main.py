@@ -651,6 +651,7 @@ def get_commercial_valuations(bbox: str = Query(..., description="west,south,eas
                 SELECT
                     property_number, category, uses, valuation, address, eircode,
                     local_authority, car_park, total_floor_area,
+                    publication_date, valuation_date, floor_details,
                     ST_AsGeoJSON(geom)::json AS geometry
                 FROM commercial_valuations
                 WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
@@ -664,7 +665,16 @@ def get_commercial_valuations(bbox: str = Query(..., description="west,south,eas
 
     features = []
     for row in rows:
-        (pn, cat, uses, val, addr, eircode, la, car_park, floor_area, geometry) = row
+        (pn, cat, uses, val, addr, eircode, la, car_park, floor_area,
+         pub_date, val_date, floor_details, geometry) = row
+        # Parse floor details JSON
+        import json as _json
+        floors = None
+        if floor_details:
+            try:
+                floors = _json.loads(floor_details) if isinstance(floor_details, str) else floor_details
+            except Exception:
+                floors = None
         features.append({
             "type": "Feature",
             "id": pn,
@@ -680,6 +690,9 @@ def get_commercial_valuations(bbox: str = Query(..., description="west,south,eas
                 "local_authority": la,
                 "car_park": car_park,
                 "total_floor_area": float(floor_area) if floor_area else None,
+                "publication_date": pub_date,
+                "valuation_date": val_date,
+                "floor_details": floors,
             },
         })
 

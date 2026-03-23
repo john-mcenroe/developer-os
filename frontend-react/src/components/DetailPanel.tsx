@@ -61,6 +61,8 @@ export function DetailPanel({ type, properties, enrichedData, enrichedLoading, o
           <RzltDetail props={properties as unknown as RzltProperties} />
         ) : type === 'side_site' ? (
           <SideSiteDetail props={properties as unknown as SideSiteProperties} />
+        ) : type === 'commercial' ? (
+          <CommercialDetail props={properties as unknown as Record<string, unknown>} />
         ) : (
           <GenericDetail props={properties} />
         )}
@@ -938,6 +940,74 @@ function SideSiteDetail({ props }: { props: SideSiteProperties }) {
         <Row label="Owner Occupied" value={props.owner_occupied_pct ? `${props.owner_occupied_pct}%` : '—'} />
         <Row label="Vacancy" value={props.vacancy_rate ? `${props.vacancy_rate}%` : '—'} />
       </Card>
+    </div>
+  );
+}
+
+function CommercialDetail({ props }: { props: Record<string, unknown> }) {
+  const valuation = props.valuation as number | null;
+  const floorArea = props.total_floor_area as number | null;
+  const valPerSqm = valuation && floorArea ? Math.round(valuation / floorArea) : null;
+  const pubDate = props.publication_date as string | null;
+  const valDate = props.valuation_date as string | null;
+
+  // Parse floor details - MapLibre serializes JSON as string
+  let floors: Array<{ Level?: number; FloorUse?: string; Area?: number; NavPerM2?: number; Nav?: number }> = [];
+  if (props.floor_details) {
+    try {
+      const raw = typeof props.floor_details === 'string' ? JSON.parse(props.floor_details) : props.floor_details;
+      if (Array.isArray(raw)) floors = raw;
+    } catch { /* ignore */ }
+  }
+
+  return (
+    <div className="detail-cards">
+      <Card title="Business Details">
+        <Row label="Use" value={props.uses as string || '—'} />
+        <Row label="Category" value={props.category as string || '—'} />
+        <Row label="Address" value={props.address as string || '—'} />
+        {props.eircode && <Row label="Eircode" value={props.eircode as string} />}
+        <Row label="Authority" value={props.local_authority as string || '—'} />
+      </Card>
+
+      <Card title="Valuation">
+        <Row label="Rateable Value" value={valuation ? `€${valuation.toLocaleString()}` : '—'} />
+        <Row label="Total Floor Area" value={floorArea ? `${floorArea.toLocaleString()} sqm` : '—'} />
+        {valPerSqm && <Row label="Value per sqm" value={`€${valPerSqm}/sqm`} />}
+        {(props.car_park as number) > 0 && <Row label="Car Parks" value={String(props.car_park)} />}
+      </Card>
+
+      <Card title="Valuation History">
+        <Row label="Publication Date" value={pubDate || '—'} />
+        <Row label="Valuation Date" value={valDate || '—'} />
+        {valDate && (() => {
+          const parts = (valDate as string).split('/');
+          if (parts.length === 3) {
+            const year = parseInt(parts[2]);
+            const age = new Date().getFullYear() - year;
+            return <Row label="Valuation Age" value={`${age} years`} />;
+          }
+          return null;
+        })()}
+      </Card>
+
+      {floors.length > 0 && (
+        <Card title="Floor Breakdown">
+          <div style={{ fontSize: '12px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '40px 1fr 70px 70px', gap: '4px', fontWeight: 600, borderBottom: '1px solid #eee', paddingBottom: '4px', marginBottom: '4px' }}>
+              <span>Floor</span><span>Use</span><span style={{ textAlign: 'right' }}>Area</span><span style={{ textAlign: 'right' }}>€/sqm</span>
+            </div>
+            {floors.map((f, i) => (
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '40px 1fr 70px 70px', gap: '4px', padding: '2px 0' }}>
+                <span style={{ color: '#999' }}>{f.Level ?? '?'}</span>
+                <span>{f.FloorUse || '—'}</span>
+                <span style={{ textAlign: 'right' }}>{f.Area ? `${f.Area}` : '—'}</span>
+                <span style={{ textAlign: 'right' }}>{f.NavPerM2 ? `€${f.NavPerM2}` : '—'}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
