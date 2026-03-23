@@ -1669,6 +1669,208 @@ def get_parcel_enriched(parcel_id: int, parcel_type: str = Query("freehold")):
     }
 
 
+@app.get("/api/site/enrich")
+def get_site_enrichment(
+    lng: float = Query(..., description="Longitude"),
+    lat: float = Query(..., description="Latitude"),
+    radius: int = Query(500, ge=100, le=2000, description="Search radius in metres"),
+):
+    """Universal site enrichment: nearby planning, sales, zoning, census, commercial context for any point."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            centroid_2157 = "ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 2157)"
+
+            # 1) RZLT overlap
+            cur.execute(
+                f"""
+                SELECT zone_desc, site_area, local_authority_name, zone_gzt
+                FROM rzlt
+                WHERE ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+                LIMIT 5
+                """,
+                (lng, lat, radius),
+            )
+            rzlt_overlap = [
+                {"zone_desc": r[0], "site_area": r[1], "local_authority_name": r[2], "zone_gzt": r[3]}
+                for r in cur.fetchall()
+            ]
+
+            # 2) Nearby planning — merge DLR + national, sorted by distance
+            planning_queries = []
+            # DLR planning
+            cur.execute(
+                f"""
+                SELECT
+                    plan_ref AS ref, decision, descrptn AS description,
+                    reg_date::text AS date, NULL AS dev_description,
+                    ROUND(ST_Distance(ST_Transform(geom, 2157), {centroid_2157})::numeric, 0) AS distance_m,
+                    'DLR' AS source
+                FROM dlr_planning_polygons
+                WHERE ST_DWithin(ST_Transform(geom, 2157), {centroid_2157}, %s)
+                ORDER BY distance_m
+                LIMIT 5
+                """,
+                (lng, lat, lng, lat, radius),
+            )
+            planning_queries.extend(cur.fetchall())
+            # National planning
+            cur.execute(
+                f"""
+                SELECT
+                    applicationnumber AS ref, decision, NULL AS description,
+                    to_timestamp(receiveddate/1000)::date::text AS date,
+                    developmentdescription AS dev_description,
+                    ROUND(ST_Distance(ST_Transform(geom, 2157), {centroid_2157})::numeric, 0) AS distance_m,
+                    planningauthority AS source
+                FROM national_planning_polygons
+                WHERE ST_DWithin(ST_Transform(geom, 2157), {centroid_2157}, %s)
+                ORDER BY distance_m
+                LIMIT 5
+                """,
+                (lng, lat, lng, lat, radius),
+            )
+            planning_queries.extend(cur.fetchall())
+            # Combine and sort by distance, take top 8
+            planning_queries.sort(key=lambda r: r[5] if r[5] is not None else 99999)
+            nearby_planning = [
+                {
+                    "ref": r[0], "decision": r[1], "description": r[2] or r[4],
+                    "date": r[3], "distance_m": int(r[5]) if r[5] is not None else None,
+                    "source": r[6],
+                }
+                for r in planning_queries[:8]
+            ]
+
+            # 3) Sales stats within radius
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS cnt,
+                    COALESCE(ROUND(AVG(sale_price)), 0) AS avg_sale,
+                    COALESCE(ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY sale_price)), 0) AS median_sale,
+                    COALESCE(ROUND(AVG(CASE WHEN floor_area_m2 > 0 THEN sale_price / floor_area_m2 END)), 0) AS avg_price_sqm
+                FROM sold_properties
+                WHERE ST_DWithin(ST_Transform(geom, 2157), {centroid_2157}, %s)
+                AND sale_price > 0 AND sale_price < 10000000
+                """,
+                (lng, lat, radius),
+            )
+            sales_agg = cur.fetchone()
+            sales_count, avg_sale, median_sale, avg_psm = sales_agg
+
+            # Top 5 nearest recent sales
+            cur.execute(
+                f"""
+                SELECT
+                    address, sale_price, sale_date::text, property_type,
+                    ROUND(ST_Distance(ST_Transform(geom, 2157), {centroid_2157})::numeric, 0) AS distance_m
+                FROM sold_properties
+                WHERE ST_DWithin(ST_Transform(geom, 2157), {centroid_2157}, %s)
+                AND sale_price > 0 AND sale_price < 10000000
+                ORDER BY sale_date DESC NULLS LAST
+                LIMIT 5
+                """,
+                (lng, lat, lng, lat, radius),
+            )
+            recent_sales = [
+                {
+                    "address": r[0], "sale_price": r[1], "sale_date": r[2],
+                    "property_type": r[3], "distance_m": int(r[4]) if r[4] is not None else None,
+                }
+                for r in cur.fetchall()
+            ]
+
+            # 4) Zoning
+            cur.execute(
+                """
+                SELECT zone_code, zone_description, local_authority
+                FROM zoning
+                WHERE ST_Intersects(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+                LIMIT 3
+                """,
+                (lng, lat),
+            )
+            zoning_rows = cur.fetchall()
+            zoning = [
+                {"zone_code": r[0], "zone_description": r[1], "local_authority": r[2]}
+                for r in zoning_rows
+            ]
+
+            # 5) Census
+            cur.execute(
+                """
+                SELECT
+                    total_population, population_density,
+                    apartment_pct, owner_occupied_pct, rented_pct,
+                    vacancy_rate, employment_rate, third_level_pct,
+                    wfh_pct, avg_rooms, health_good_pct,
+                    avg_household_size
+                FROM census_small_areas
+                WHERE ST_Intersects(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+                AND total_population IS NOT NULL
+                LIMIT 1
+                """,
+                (lng, lat),
+            )
+            census_row = cur.fetchone()
+            census = None
+            if census_row:
+                _f = lambda v: float(v) if v is not None else None
+                _i = lambda v: int(v) if v is not None else None
+                census = {
+                    "total_population": _i(census_row[0]),
+                    "population_density": _f(census_row[1]),
+                    "apartment_pct": _f(census_row[2]),
+                    "owner_occupied_pct": _f(census_row[3]),
+                    "rented_pct": _f(census_row[4]),
+                    "vacancy_rate": _f(census_row[5]),
+                    "employment_rate": _f(census_row[6]),
+                    "third_level_pct": _f(census_row[7]),
+                    "wfh_pct": _f(census_row[8]),
+                    "avg_rooms": _f(census_row[9]),
+                    "health_good_pct": _f(census_row[10]),
+                    "avg_household_size": _f(census_row[11]),
+                }
+
+            # 6) Commercial context
+            cur.execute(
+                f"""
+                SELECT COUNT(*), STRING_AGG(DISTINCT category, ', '),
+                       COALESCE(ROUND(AVG(valuation)), 0)
+                FROM commercial_valuations
+                WHERE ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+                """,
+                (lng, lat, radius),
+            )
+            comm_row = cur.fetchone()
+            commercial = None
+            if comm_row and comm_row[0] > 0:
+                commercial = {
+                    "count": comm_row[0],
+                    "categories": comm_row[1],
+                    "avg_valuation": int(comm_row[2]),
+                }
+
+    finally:
+        put_conn(conn)
+
+    return {
+        "rzlt_overlap": rzlt_overlap,
+        "nearby_planning": nearby_planning,
+        "nearby_sales": {
+            "count": sales_count,
+            "avg_sale_price": int(avg_sale),
+            "median_sale_price": int(median_sale),
+            "avg_price_per_sqm": int(avg_psm),
+            "recent": recent_sales,
+        },
+        "zoning": zoning,
+        "census": census,
+        "commercial": commercial,
+    }
+
+
 @app.get("/api/search")
 async def search_location(q: str = Query(..., description="Location name or address")):
     """Geocode a location string using Nominatim (OpenStreetMap)."""
