@@ -766,7 +766,7 @@ function updateZoomHint(zoom) {
 function setupParcelClick(fillLayerId, selectedLayerId, parcelType) {
   map.on("click", fillLayerId, (e) => {
     if (circleMode) return;
-    if (Date.now() - aiMarkerClickedAt < 300) return; // AI marker click takes priority
+    if (aiActiveResultIdx >= 0 && aiMarkers.length > 0) return; // AI results active — click cards instead
     if (!e.features || e.features.length === 0) return;
     const feature = e.features[0];
     const id = feature.id;
@@ -796,7 +796,7 @@ function setupParcelClick(fillLayerId, selectedLayerId, parcelType) {
 function setupPlanningClick(fillLayerId, selectedLayerId) {
   map.on("click", fillLayerId, (e) => {
     if (circleMode) return;
-    if (Date.now() - aiMarkerClickedAt < 300) return; // AI marker click takes priority
+    if (aiActiveResultIdx >= 0 && aiMarkers.length > 0) return; // AI results active — click cards instead
     if (!e.features || e.features.length === 0) return;
     const feature = e.features[0];
     const id = feature.id;
@@ -824,7 +824,7 @@ function setupPlanningClick(fillLayerId, selectedLayerId) {
 function setupSoldPropertyClick() {
   map.on("click", "sold_properties-fill", (e) => {
     if (circleMode) return;
-    if (Date.now() - aiMarkerClickedAt < 300) return; // AI marker click takes priority
+    if (aiActiveResultIdx >= 0 && aiMarkers.length > 0) return; // AI results active — click cards instead
     if (!e.features || e.features.length === 0) return;
     const props = e.features[0].properties;
 
@@ -858,7 +858,7 @@ map.on("load", () => {
   // SD LAP Boundaries click
   map.on("click", "sd_lap_boundaries-fill", (e) => {
     if (circleMode) return;
-    if (Date.now() - aiMarkerClickedAt < 300) return; // AI marker click takes priority
+    if (aiActiveResultIdx >= 0 && aiMarkers.length > 0) return; // AI results active — click cards instead
     if (!e.features || e.features.length === 0) return;
     showLapBoundaryFlyout(e.features[0].properties);
   });
@@ -868,7 +868,7 @@ map.on("load", () => {
   // SD Planning Register click
   map.on("click", "sd_planning_register-fill", (e) => {
     if (circleMode) return;
-    if (Date.now() - aiMarkerClickedAt < 300) return; // AI marker click takes priority
+    if (aiActiveResultIdx >= 0 && aiMarkers.length > 0) return; // AI results active — click cards instead
     if (!e.features || e.features.length === 0) return;
     const feature = e.features[0];
     if (map.getLayer("sd_planning_register-selected")) {
@@ -884,7 +884,7 @@ map.on("load", () => {
 function setupSideSiteClick() {
   map.on("click", "side_sites-fill", (e) => {
     if (circleMode) return;
-    if (Date.now() - aiMarkerClickedAt < 300) return; // AI marker click takes priority
+    if (aiActiveResultIdx >= 0 && aiMarkers.length > 0) return; // AI results active — click cards instead
     if (!e.features || e.features.length === 0) return;
     const props = e.features[0].properties;
 
@@ -1491,7 +1491,7 @@ function showRzltFlyout(data) {
 function setupCensusClick() {
   map.on("click", "census_small_areas-fill", (e) => {
     if (circleMode) return;
-    if (Date.now() - aiMarkerClickedAt < 300) return; // AI marker click takes priority
+    if (aiActiveResultIdx >= 0 && aiMarkers.length > 0) return; // AI results active — click cards instead
     if (!e.features || e.features.length === 0) return;
     const feature = e.features[0];
     const id = feature.id;
