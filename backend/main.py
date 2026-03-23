@@ -1859,12 +1859,73 @@ def get_site_enrichment(
                     "avg_valuation": int(comm_row[2]),
                 }
 
+            # 7) Recent planning grants (last 2 years) — the strongest development signal
+            cur.execute(
+                f"""
+                SELECT
+                    applicationnumber,
+                    decision,
+                    LEFT(developmentdescription, 120) AS description,
+                    to_timestamp(decisiondate/1000)::date::text AS decision_date,
+                    numresidentialunits,
+                    floorarea,
+                    applicationtype,
+                    ROUND(ST_Distance(ST_Transform(geom, 2157), {centroid_2157})::numeric, 0) AS distance_m
+                FROM national_planning_polygons
+                WHERE {bbox_filter}
+                  AND ST_DWithin(ST_Transform(geom, 2157), {centroid_2157}, %s)
+                  AND (UPPER(decision) LIKE '%%GRANT%%' OR UPPER(decision) LIKE '%%CONDITIONAL%%')
+                  AND to_timestamp(decisiondate/1000) > NOW() - INTERVAL '2 years'
+                ORDER BY
+                    COALESCE(numresidentialunits, 0) DESC,
+                    distance_m ASC
+                LIMIT 8
+                """,
+                (*bbox_params, lng, lat, lng, lat, radius),
+            )
+            recent_grants = [
+                {
+                    "ref": r[0], "decision": r[1], "description": r[2],
+                    "decision_date": r[3], "residential_units": r[4],
+                    "floor_area": float(r[5]) if r[5] else None,
+                    "application_type": r[6],
+                    "distance_m": int(r[7]) if r[7] is not None else None,
+                }
+                for r in cur.fetchall()
+            ]
+
+            # Summary stats for grants
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*),
+                    SUM(COALESCE(numresidentialunits, 0)),
+                    COUNT(*) FILTER (WHERE numresidentialunits >= 5)
+                FROM national_planning_polygons
+                WHERE {bbox_filter}
+                  AND ST_DWithin(ST_Transform(geom, 2157), {centroid_2157}, %s)
+                  AND (UPPER(decision) LIKE '%%GRANT%%' OR UPPER(decision) LIKE '%%CONDITIONAL%%')
+                  AND to_timestamp(decisiondate/1000) > NOW() - INTERVAL '2 years'
+                """,
+                (*bbox_params, lng, lat, lng, lat, radius),
+            )
+            grant_stats = cur.fetchone()
+            grants_summary = None
+            if grant_stats and grant_stats[0] > 0:
+                grants_summary = {
+                    "total_grants": grant_stats[0],
+                    "total_units_approved": int(grant_stats[1]),
+                    "significant_schemes": grant_stats[2],  # 5+ units
+                }
+
     finally:
         put_conn(conn)
 
     return {
         "rzlt_overlap": rzlt_overlap,
         "nearby_planning": nearby_planning,
+        "recent_grants": recent_grants,
+        "grants_summary": grants_summary,
         "nearby_sales": {
             "count": sales_count,
             "avg_sale_price": int(avg_sale),
@@ -2619,6 +2680,13 @@ HYPOTHESIS GUIDELINES:
   * Undervalued commercial (low valuation relative to floor area) = redevelopment potential
   * Multiple commercial uses on one site (e.g. office + restaurant) = complex site with conversion potential
   * Commercial sites near recent residential planning grants = proven change-of-use precedent
+- PLANNING PRECEDENT (CRITICAL): For ANY site search query, ALWAYS include at least one hypothesis that cross-references with recent planning grants. Planning precedent is the strongest signal for development viability. Use patterns like:
+  * Find candidate sites (from cadastral/RZLT/commercial) that have granted residential planning applications within 500m in the last 2 years: JOIN national_planning_polygons np ON ST_DWithin(candidate.geom::geography, np.geom::geography, 500) WHERE (UPPER(np.decision) LIKE '%%GRANT%%' OR UPPER(np.decision) LIKE '%%CONDITIONAL%%') AND to_timestamp(np.decisiondate/1000) > NOW() - INTERVAL '2 years' AND np.numresidentialunits > 0
+  * Count nearby grants and include as a column: e.g. "nearby_grants_2yr" — sites with more nearby grants score higher
+  * Filter for large residential schemes: np.numresidentialunits >= 5 finds significant housing developments (not just extensions)
+  * Include grant details in SELECT: np.applicationnumber, np.numresidentialunits, np.developmentdescription (truncated) — these appear in the developer's result card
+  * Decision values for grants: UPPER(decision) LIKE '%%GRANT%%' OR UPPER(decision) LIKE '%%CONDITIONAL%%' (captures 'CONDITIONAL', 'GRANT PERMISSION', 'Granted (Conditional)')
+  * ALWAYS use spatial filter (bbox + ST_DWithin) on national_planning_polygons — it has 483k rows
 
 RESULT QUALITY FILTERS (apply in SQL WHERE clauses):
 - For RESIDENTIAL site queries on cadastral tables: always add area_sqm >= 150 (minimum viable residential plot)
@@ -2680,10 +2748,11 @@ Here are the query results from different analytical angles:
 YOUR TASK: Pick the BEST 8-15 sites across ALL queries and rank them. The developer just wants to see the top opportunities on a map — no theory, no hypotheses, just results.
 
 RANKING CRITERIA (in order of importance):
-1. Actionability — can a developer actually do something with this site?
-2. Signal strength — does the data clearly show an opportunity (underpriced, large parcel, RZLT pressure, etc.)?
-3. Cross-reference value — sites that appear in multiple queries or combine multiple signals rank higher.
-4. Specificity — a specific site with an address beats an aggregated statistic.
+1. Planning precedent — sites near RECENT (last 2 years) granted planning permissions for residential development score MUCH higher. A site with 3+ residential grants within 500m is proven territory. Include grant ref numbers and unit counts in your reason.
+2. Actionability — can a developer actually do something with this site? RZLT sites (motivated seller), vacant land, and underused commercial properties are most actionable.
+3. Signal strength — does the data clearly show an opportunity (underpriced, large parcel, RZLT pressure, nearby grants, etc.)? Multiple overlapping signals = higher score.
+4. Cross-reference value — sites that appear in multiple queries or combine multiple signals rank higher. A site that is RZLT + near grants + underpriced is exceptional.
+5. Specificity — a specific site with an address beats an aggregated statistic.
 
 RESPONSE FORMAT (valid JSON only, no markdown):
 {{
@@ -2729,12 +2798,14 @@ TITLE RULES:
 REASON RULES:
 - "reason" must be 2-3 sentences citing SPECIFIC data from the query results.
 - MUST mention concrete numbers: price/sqm vs area average, RZLT tax liability, nearby planning grant ref numbers, vacancy rates, floor area compared to peers.
+- PLANNING PRECEDENT IS CRITICAL: If the query results include nearby_grants count, grant ref numbers (applicationnumber), or numresidentialunits, you MUST cite them in the reason. Example: "3 residential grants within 500m (ref 4436/23 for 1,098 units, ref SDZ25A/0013W for 886 units) confirm strong development precedent."
 - For commercial sites: mention current use, total floor area, valuation, and WHY change-of-use or redevelopment makes sense (nearby residential pricing, planning precedent, area demographics).
-- Bad: "Good site for development." Good: "319sqm office/restaurant site valued at €X with floor area well above local retail average. 3 residential planning grants within 500m suggest strong change-of-use precedent. Area vacancy rate of 8% indicates demand."
+- Bad: "Good site for development." Good: "319sqm office/restaurant site valued at €85k. 4 residential grants within 500m in last 2 years (including ref DCC-2024-1234 for 45 apartments) confirm strong change-of-use precedent. RZLT pressure adds acquisition leverage."
 
 SIGNAL RULES:
 - "signals" is an array of 1-4 short tags (max 4 words each) that justify the score.
-- Examples: "RZLT pressure", "Below market price/sqm", "Adjacent planning grant", "High vacancy area", "Large underused parcel", "Change of use potential", "Near transport hub", "Infill opportunity", "Corner site", "Multiple frontages"
+- Planning signals (use when data shows nearby grants): "X grants within 500m", "Residential precedent", "Large scheme nearby", "SHD/LRD approved nearby"
+- Other signals: "RZLT pressure", "Below market price/sqm", "High vacancy area", "Large underused parcel", "Change of use potential", "Near transport hub", "Infill opportunity", "Corner site"
 
 SITE FILTERING — REJECT these (do NOT include in sites array):
 - Road strips, motorway parcels, and infrastructure land (typically very elongated with area < 200sqm)

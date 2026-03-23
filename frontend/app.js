@@ -3521,9 +3521,42 @@ function buildEnrichmentHTML(enrichment) {
     html += `</div>`;
   }
 
-  // Nearby planning
+  // Recent grants (last 2 years) — strongest development signal, shown FIRST
+  const gs = enrichment.grants_summary;
+  if (gs && gs.total_grants > 0) {
+    const unitText = gs.total_units_approved > 0 ? ` · ${gs.total_units_approved.toLocaleString()} units approved` : "";
+    const schemeText = gs.significant_schemes > 0 ? ` · ${gs.significant_schemes} major scheme${gs.significant_schemes > 1 ? "s" : ""}` : "";
+    html += `<div class="enrichment-section">
+      <div class="grants-banner">${gs.total_grants} Planning Grant${gs.total_grants > 1 ? "s" : ""} (Last 2 Years)${unitText}${schemeText}</div>`;
+    if (enrichment.recent_grants && enrichment.recent_grants.length > 0) {
+      for (const g of enrichment.recent_grants.slice(0, 5)) {
+        const desc = g.description ? (g.description.length > 70 ? g.description.substring(0, 70) + "…" : g.description) : "—";
+        const units = g.residential_units ? `${g.residential_units} unit${g.residential_units > 1 ? "s" : ""}` : "";
+        const area = g.floor_area ? `${g.floor_area.toLocaleString()}m²` : "";
+        const dist = g.distance_m != null ? `${g.distance_m}m` : "";
+        const datePart = g.decision_date || "";
+        html += `<div class="grant-row">
+          <div class="grant-header">
+            <span class="grant-ref">${g.ref || "—"}</span>
+            <span class="grant-meta">${[units, area, dist].filter(Boolean).join(" · ")}</span>
+          </div>
+          <div class="grant-desc">${desc}</div>
+          ${datePart ? `<div class="grant-date">${datePart}</div>` : ""}
+        </div>`;
+      }
+    }
+    html += `</div>`;
+  } else {
+    // No recent grants — still show as useful info
+    html += `<div class="enrichment-section">
+      <div class="enrichment-section-title">Planning Grants <span class="enrichment-subtitle">(last 2 years)</span></div>
+      <p class="enrichment-empty">No granted applications within 500m in the last 2 years</p>
+    </div>`;
+  }
+
+  // All nearby planning (including refused, older)
   if (enrichment.nearby_planning && enrichment.nearby_planning.length > 0) {
-    html += `<div class="enrichment-section"><div class="enrichment-section-title">Planning Precedent <span class="enrichment-subtitle">(within 500m)</span></div>`;
+    html += `<div class="enrichment-section"><div class="enrichment-section-title">All Planning Activity <span class="enrichment-subtitle">(within 500m)</span></div>`;
     for (const pl of enrichment.nearby_planning.slice(0, 5)) {
       const desc = pl.description ? (pl.description.length > 50 ? pl.description.substring(0, 50) + "…" : pl.description) : "—";
       const decision = pl.decision || "—";
