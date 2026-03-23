@@ -2297,14 +2297,16 @@ TABLE: cadastral_leasehold (leasehold parcels — ~200k rows, geom is Polygon)
   (same schema as cadastral_freehold)
   -- SPATIAL INDEX on geom. ALWAYS use spatial filter.
 
-TABLE: rzlt (Residential Zoned Land Tax sites — ~4k rows, geom is Polygon)
+TABLE: rzlt (Residential Zoned Land Tax sites — ~260k rows nationwide, geom is Polygon)
   ogc_fid SERIAL PRIMARY KEY
-  zone_desc TEXT              -- e.g. 'Residential', 'Mixed Use'
+  zone_desc TEXT              -- zoning objective from local authority development plan (e.g. 'To provide for residential development...', 'To protect and improve residential amenity')
   zone_gzt TEXT
   gzt_desc TEXT
-  site_area NUMERIC           -- area in sqm
-  local_authority_name TEXT   -- e.g. 'Dublin City Council', 'Dún Laoghaire-Rathdown'
+  site_area NUMERIC           -- area in HECTARES (NOT sqm). Average 0.16ha, max 36ha. 1ha = 10,000sqm.
+  local_authority_name TEXT   -- e.g. 'Dublin City Council', 'Dún Laoghaire-Rathdown County Council', 'South Dublin County Council'
   geom GEOMETRY(Polygon, 4326)
+  -- RZLT = 3% annual tax on zoned, serviced, undeveloped residential land. Strong motivated seller signal.
+  -- Most useful sites for developers: site_area > 0.5 (i.e. >5,000sqm / >0.5ha). Skip tiny garden plots (<0.1ha).
 
 TABLE: dlr_planning_polygons (planning applications in Dún Laoghaire-Rathdown — ~15k rows, geom is Polygon)
   ogc_fid SERIAL PRIMARY KEY
