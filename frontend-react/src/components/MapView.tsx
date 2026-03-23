@@ -422,6 +422,10 @@ export function MapView() {
         setSelectedType('zoning');
         setSelectedProps(props);
         setSelectedSourceId('zoning');
+      } else if (layerId.startsWith('commercial_valuations')) {
+        setSelectedType('commercial');
+        setSelectedProps(props);
+        setSelectedSourceId('commercial_valuations');
       } else {
         setSelectedType('generic');
         setSelectedProps(props);
@@ -442,7 +446,7 @@ export function MapView() {
       'side_sites-fill', 'sd_lap_boundaries-fill', 'sd_planning_register-fill',
       'osm_buildings-fill', 'osm_amenities-fill', 'osm_transport-fill',
       'flood_zones-fill', 'niah_buildings-fill',
-      'schools-fill', 'landuse-fill', 'zoning-fill',
+      'schools-fill', 'landuse-fill', 'zoning-fill', 'commercial_valuations-fill',
     ].filter((id) => map.getLayer(id));
     const features = map.queryRenderedFeatures(e.point, { layers: interactiveLayers });
     map.getCanvas().style.cursor = features.length > 0 ? 'pointer' : '';
@@ -840,6 +844,21 @@ export function MapView() {
             id="zoning-outline"
             type="line"
             paint={{ 'line-color': '#9c27b0', 'line-width': 1.5 }}
+          />
+        </Source>
+
+        {/* === Commercial Valuations === */}
+        <Source id="commercial_valuations" type="geojson" data={EMPTY_FC}>
+          <Layer
+            id="commercial_valuations-fill"
+            type="circle"
+            paint={{
+              'circle-radius': 4,
+              'circle-color': '#e91e63',
+              'circle-opacity': 0.7,
+              'circle-stroke-width': 1,
+              'circle-stroke-color': '#fff',
+            }}
           />
         </Source>
 

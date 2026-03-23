@@ -87,6 +87,7 @@ function getMeta(type: string | null): { title: string; icon: string; accent: st
     case 'school': return { title: 'School', icon: '▣', accent: '#4caf50' };
     case 'landuse': return { title: 'Land Use', icon: '▢', accent: '#8bc34a' };
     case 'zoning': return { title: 'Zoning', icon: '▤', accent: '#9c27b0' };
+    case 'commercial': return { title: 'Commercial Property', icon: '◈', accent: '#e91e63' };
     default: return { title: 'Detail', icon: '○', accent: '#3b82f6' };
   }
 }

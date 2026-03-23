@@ -635,6 +635,57 @@ def get_zoning(bbox: str = Query(..., description="west,south,east,north")):
     return JSONResponse({"type": "FeatureCollection", "features": features})
 
 
+@app.get("/api/commercial_valuations")
+def get_commercial_valuations(bbox: str = Query(..., description="west,south,east,north")):
+    """Return commercial property valuations as GeoJSON within a bounding box."""
+    try:
+        west, south, east, north = parse_bbox(bbox)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must be west,south,east,north")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    property_number, category, uses, valuation, address, eircode,
+                    local_authority, car_park, total_floor_area,
+                    ST_AsGeoJSON(geom)::json AS geometry
+                FROM commercial_valuations
+                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                LIMIT 2000
+                """,
+                (west, south, east, north),
+            )
+            rows = cur.fetchall()
+    finally:
+        put_conn(conn)
+
+    features = []
+    for row in rows:
+        (pn, cat, uses, val, addr, eircode, la, car_park, floor_area, geometry) = row
+        features.append({
+            "type": "Feature",
+            "id": pn,
+            "geometry": geometry,
+            "properties": {
+                "id": pn,
+                "property_number": pn,
+                "category": cat,
+                "uses": uses,
+                "valuation": val,
+                "address": addr,
+                "eircode": eircode,
+                "local_authority": la,
+                "car_park": car_park,
+                "total_floor_area": float(floor_area) if floor_area else None,
+            },
+        })
+
+    return JSONResponse({"type": "FeatureCollection", "features": features})
+
+
 @app.get("/api/schools")
 def get_schools(bbox: str = Query(..., description="west,south,east,north")):
     """Return schools as GeoJSON within a bounding box."""
@@ -1914,7 +1965,7 @@ ALLOWED_TABLES = {
     "national_planning_points", "national_planning_polygons",
     "osm_amenities", "osm_transport",
     "flood_zones", "niah_buildings",
-    "schools", "landuse", "zoning",
+    "schools", "landuse", "zoning", "commercial_valuations",
 }
 
 SQL_BLOCKLIST = re.compile(
@@ -2191,6 +2242,21 @@ TABLE: zoning (Development plan zoning designations — 8,115 polygons for Dubli
   -- Key zoning codes: Residential (Objective A, RS, RA, Z1, Z2), Commercial (Z4, Z5, TC), Industrial (GE, Z6),
   -- Open Space (Objective F, OS, Z7, Z9), Green Belt (GB), Community (CI, Z15)
   -- Use ST_Intersects to find what zone a site is in. Critical for development feasibility.
+
+TABLE: commercial_valuations (38,127 commercial properties with occupier details, Dublin region, geom is Point)
+  property_number INTEGER PRIMARY KEY
+  category TEXT               -- OFFICE, RETAIL (SHOPS), INDUSTRIAL USES, HOSPITALITY, LEISURE, HEALTH, etc.
+  uses TEXT                   -- specific use: 'SHOP', 'OFFICE (4th GENERATION)', 'WAREHOUSE', 'RESTAURANT', 'PUB', etc.
+  valuation INTEGER           -- rateable valuation in EUR (proxy for annual rental value)
+  address TEXT                -- full address
+  eircode TEXT                -- Irish postcode
+  local_authority TEXT        -- DUBLIN CITY COUNCIL, DUN LAOGHAIRE-RATHDOWN, FINGAL, SOUTH DUBLIN
+  car_park INTEGER            -- number of car park spaces
+  total_floor_area NUMERIC    -- total floor area in sq meters
+  floor_details JSONB         -- per-floor breakdown: level, floor_use, area, nav_per_m2, nav
+  geom GEOMETRY(Point, 4326)
+  -- Source: Tailte Éireann Valuation Office. Shows which businesses occupy which sites.
+  -- Use ST_DWithin to find commercial tenants near a site. Join with parcels to identify occupied vs vacant land.
 
 TABLE: landuse (OpenStreetMap land use polygons — 577,853 polygons for Ireland, LARGE, geom is MultiPolygon)
   ogc_fid SERIAL PRIMARY KEY
