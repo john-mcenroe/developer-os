@@ -1032,15 +1032,21 @@ function showParcelFlyout(data) {
   openFlyout("Parcel Detail");
 }
 
-function showEnrichedParcelFlyout(data) {
+function showEnrichedParcelFlyout(data, enrichment) {
   const p = data.parcel;
   const areaSqm = p.area_sqm ? p.area_sqm.toLocaleString() : "—";
   const areaAcres = p.area_acres != null ? p.area_acres : "—";
   const typeLabel = (p.type || "freehold").charAt(0).toUpperCase() + (p.type || "freehold").slice(1);
   const typeColor = p.type === "leasehold" ? "#6495ed" : "#ff8c00";
 
+  // ── Visualize links ──
+  let html = "";
+  if (p.centroid_lng && p.centroid_lat) {
+    html += buildVisualizeLinkHTML({lng: p.centroid_lng, lat: p.centroid_lat});
+  }
+
   // ── Section 1: Parcel Basics ──
-  let html = `
+  html += `
     <div class="detail-row">
       <div class="detail-label">Area</div>
       <div class="detail-value large">${areaSqm} m²</div>
@@ -1201,6 +1207,12 @@ function showEnrichedParcelFlyout(data) {
         </div>
       </div>
     `;
+  }
+
+  // Add development feasibility + enrichment from separate enrichment call
+  if (enrichment) {
+    html += buildPlanningAnalysisHTML(enrichment);
+    html += buildEnrichmentHTML(enrichment);
   }
 
   flyoutContent.innerHTML = html;
@@ -1423,7 +1435,12 @@ function showRzltFlyout(data) {
   }
   if (aiSection) aiSection += "<hr>";
 
+  // Get coordinates for visualize links
+  const lng = data.lng || (data.geometry && data.geometry.coordinates ? data.geometry.coordinates[0] : null);
+  const lat = data.lat || (data.geometry && data.geometry.coordinates ? data.geometry.coordinates[1] : null);
+
   flyoutContent.innerHTML = `
+    ${(lng && lat) ? buildVisualizeLinkHTML({lng, lat}) : ""}
     ${aiSection}
     <div class="rzlt-alert">RZLT Site — 3% Annual Tax</div>
     <div class="detail-row">
@@ -1442,19 +1459,17 @@ function showRzltFlyout(data) {
       <div class="detail-label">Local Authority</div>
       <div class="detail-value">${data.local_authority_name || "—"}</div>
     </div>
-    <div id="rzlt-enrichment-placeholder" style="color:#666;font-size:11px;padding:8px 0">Loading nearby context...</div>
+    <div id="rzlt-enrichment-placeholder" style="color:#666;font-size:11px;padding:8px 0">Loading nearby planning & context...</div>
   `;
 
   openFlyout(data._title || "RZLT Site");
 
   // Fetch enrichment data for planning precedent, sales, etc.
-  const lng = data.lng || (data.geometry && data.geometry.coordinates ? data.geometry.coordinates[0] : null);
-  const lat = data.lat || (data.geometry && data.geometry.coordinates ? data.geometry.coordinates[1] : null);
   if (lng && lat) {
     fetchEnrichment(lng, lat).then(enrichment => {
       const placeholder = document.getElementById("rzlt-enrichment-placeholder");
       if (placeholder) {
-        placeholder.outerHTML = buildEnrichmentHTML(enrichment);
+        placeholder.outerHTML = buildPlanningAnalysisHTML(enrichment) + buildEnrichmentHTML(enrichment);
       }
     }).catch(() => {
       const placeholder = document.getElementById("rzlt-enrichment-placeholder");
@@ -2976,7 +2991,19 @@ function handleSSEEvent(eventType, data, loadingEl, stageTimers) {
       stageTimers.forEach(clearTimeout);
       if (loadingEl.parentNode) loadingEl.remove();
       aiSendBtn.classList.remove("loading");
-      addAiMessage("assistant", `Something went wrong: ${data.message || "Unknown error"}`);
+      // Show user-friendly error with suggestions
+      const rawErr = data.message || "Unknown error";
+      let friendlyMsg;
+      if (rawErr.includes("'name'") || rawErr.includes("KeyError") || rawErr.includes("key")) {
+        friendlyMsg = "The AI had trouble processing the results. Try a simpler query like \"Find large RZLT sites in Dublin\" or \"Show recent planning grants near Dundrum\".";
+      } else if (rawErr.includes("timeout") || rawErr.includes("Timeout")) {
+        friendlyMsg = "The query took too long — try narrowing your search area or using a simpler question.";
+      } else if (rawErr.includes("hypothesis") || rawErr.includes("Hypothesis")) {
+        friendlyMsg = "Couldn't form a search strategy for that question. Try rephrasing — for example, \"Find development sites near Sandyford\" or \"What are the cheapest houses in Rathmines?\".";
+      } else {
+        friendlyMsg = `Something went wrong: ${rawErr.length > 150 ? rawErr.substring(0, 150) + "..." : rawErr}`;
+      }
+      addAiMessage("assistant", friendlyMsg);
       break;
     }
     case "done":
@@ -3069,9 +3096,25 @@ function renderAiResponse(data) {
     if (data.results && data.results.length > 0) {
       renderEmbeddedMapMessage(data, false);
     } else {
-      addAiMessage("assistant", data.title ? `${data.title}\n${data.summary || ""}` : "No matching sites found. Try a different area or broader criteria.");
+      // Better 0-result messaging with context
+      const title = data.title || "";
+      const summary = data.summary || "";
+      let msg;
+      if (title && summary) {
+        msg = `${title}\n\n${summary}`;
+      } else if (summary) {
+        msg = summary;
+      } else {
+        msg = "No matching sites found for this query. Try a different area or broader criteria.";
+      }
+      // Add query stats context if available
+      if (data.query_stats && data.query_stats.total > 0) {
+        msg += `\n\n_Searched ${data.query_stats.total} data source${data.query_stats.total !== 1 ? "s" : ""}, ${data.query_stats.successful} returned results._`;
+      }
+      addAiMessage("assistant", msg);
     }
 
+    // Always show follow-ups (even for 0 results — they help the user recover)
     if (data.follow_ups && data.follow_ups.length > 0) {
       showAiFollowUps(data.follow_ups);
     }
@@ -3454,40 +3497,18 @@ function selectAiResult(idx, results) {
     map.flyTo({ center: [result.lng, result.lat], zoom: 17, duration: 1000 });
   }
 
-  // Show detail in flyout based on type
-  const table = result._table;
-  if (table === "sold_properties") {
-    // Sold properties: show existing flyout + fetch enrichment for context
-    showSoldFlyout(result);
-  } else if (table === "cadastral_freehold" || table === "cadastral_leasehold") {
-    const parcelId = result.ogc_fid || result.id;
-    const pType = table === "cadastral_freehold" ? "freehold" : "leasehold";
-    fetch(`${API}/parcel/${parcelId}/enriched?parcel_type=${pType}`)
-      .then((r) => r.json())
-      .then((data) => showEnrichedParcelFlyout(data))
-      .catch(() => showEnrichedAiResult(result, null));
-  } else if (table === "commercial_valuations") {
-    // Commercial: dedicated flyout with floor breakdown
-    fetchEnrichment(result.lng, result.lat)
-      .then(enrichment => showCommercialFlyout(result, enrichment))
-      .catch(() => showCommercialFlyout(result, null));
-  } else if (table === "rzlt") {
-    // RZLT: fetch enrichment for planning/sales context
-    fetchEnrichment(result.lng, result.lat)
-      .then(enrichment => showEnrichedAiResult(result, enrichment))
-      .catch(() => showEnrichedAiResult(result, null));
-  } else if (table === "dlr_planning_polygons" || table === "dlr_planning_points") {
-    showPlanningFlyout(result);
-  } else {
-    // All other types: universal enriched flyout
-    if (result.lng && result.lat) {
-      fetchEnrichment(result.lng, result.lat)
-        .then(enrichment => showEnrichedAiResult(result, enrichment))
-        .catch(() => showEnrichedAiResult(result, null));
-    } else {
-      showEnrichedAiResult(result, null);
-    }
+  // Detect commercial by content if _table tag is wrong
+  if ((result._table === "unknown" || !result._table) && result.property_number && (result.uses || result.category || result.valuation)) {
+    result._table = "commercial_valuations";
   }
+
+  // Always fetch enrichment (includes nearby planning, sales, census) for ALL result types
+  const enrichmentPromise = (result.lng && result.lat)
+    ? fetchEnrichment(result.lng, result.lat).catch((e) => { console.warn("[AI] Enrichment fetch failed:", e); return null; })
+    : Promise.resolve(null);
+
+  // Single unified flyout for all AI results
+  enrichmentPromise.then(enrichment => showAiSiteIntelligence(result, enrichment));
 }
 
 // ── Enrichment helpers ────────────────────────────────────────────────────────
@@ -3554,22 +3575,39 @@ function buildEnrichmentHTML(enrichment) {
     </div>`;
   }
 
-  // All nearby planning (including refused, older)
+  // All nearby planning — expandable section with full details, sorted recent-first
   if (enrichment.nearby_planning && enrichment.nearby_planning.length > 0) {
-    html += `<div class="enrichment-section"><div class="enrichment-section-title">All Planning Activity <span class="enrichment-subtitle">(within 500m)</span></div>`;
-    for (const pl of enrichment.nearby_planning.slice(0, 5)) {
-      const desc = pl.description ? (pl.description.length > 50 ? pl.description.substring(0, 50) + "…" : pl.description) : "—";
-      const decision = pl.decision || "—";
-      const decColor = decision.toUpperCase().includes("GRANT") ? "#2ecc71" :
-                        decision.toUpperCase().includes("REFUS") ? "#e74c3c" : "#f59e0b";
-      const dist = pl.distance_m != null ? `${pl.distance_m}m` : "";
-      html += `<div class="compact-row">
-        <span class="compact-main" style="color:${decColor}">${pl.ref || "—"}</span>
-        <span class="compact-secondary">${desc}</span>
-        <span class="compact-badge">${dist}</span>
+    const planId = `planning-details-${Date.now()}`;
+    html += `<div class="enrichment-section">
+      <div class="enrichment-section-title clickable" onclick="document.getElementById('${planId}').classList.toggle('collapsed')">
+        All Planning Activity <span class="enrichment-subtitle">(${enrichment.nearby_planning.length} within 500m)</span>
+        <span class="expand-arrow">▼</span>
+      </div>
+      <div id="${planId}" class="planning-details-list">`;
+    for (const pl of enrichment.nearby_planning) {
+      const desc = pl.description || "—";
+      const decision = pl.decision || "Pending";
+      const decUpper = decision.toUpperCase();
+      const decColor = decUpper.includes("GRANT") || decUpper.includes("CONDITIONAL") ? "#2ecc71" :
+                        decUpper.includes("REFUS") ? "#e74c3c" :
+                        decUpper.includes("WITHDRAW") ? "#888" : "#f59e0b";
+      const decLabel = decUpper.includes("GRANT") && !decUpper.includes("RETENTION") ? "GRANTED" :
+                        decUpper.includes("CONDITIONAL") ? "CONDITIONAL" :
+                        decUpper.includes("REFUS") ? "REFUSED" :
+                        decUpper.includes("RETENTION") ? "RETENTION" :
+                        decUpper.includes("WITHDRAW") ? "WITHDRAWN" : decision.substring(0, 15);
+      const dist = pl.distance_m != null ? `${pl.distance_m}m away` : "";
+      const datePart = pl.date || "";
+      html += `<div class="planning-detail-card">
+        <div class="planning-detail-header">
+          <span class="planning-ref">${pl.ref || "—"}</span>
+          <span class="planning-decision" style="background:${decColor}20;color:${decColor};border:1px solid ${decColor}40">${decLabel}</span>
+        </div>
+        <div class="planning-detail-desc">${desc.length > 120 ? desc.substring(0, 120) + "…" : desc}</div>
+        <div class="planning-detail-meta">${[datePart, dist, pl.source || ""].filter(Boolean).join(" · ")}</div>
       </div>`;
     }
-    html += `</div>`;
+    html += `</div></div>`;
   }
 
   // Nearby sales
@@ -3619,92 +3657,370 @@ function buildEnrichmentHTML(enrichment) {
   return html;
 }
 
-function showEnrichedAiResult(result, enrichment) {
-  let html = "";
-
-  // Section 1: Score + Reason + Signals
-  if (result._score) {
-    const scoreColor = result._score >= 80 ? "#22c55e" : result._score >= 60 ? "#f59e0b" : "#888";
-    html += `<div class="detail-row"><div class="detail-label">Opportunity Score</div><div class="detail-value large" style="color:${scoreColor}">${result._score}/100</div></div>`;
-  }
-  if (result.opportunity_reason) {
-    html += `<div class="detail-row"><div class="detail-label">Why</div><div class="detail-value" style="color:#22c55e;font-size:12px;line-height:1.4">${result.opportunity_reason}</div></div>`;
-  }
-  if (result._signals && result._signals.length) {
-    html += `<div class="detail-row"><div class="detail-label">Signals</div><div class="detail-value">${result._signals.map(s => `<span class="signal-badge">${s}</span>`).join(" ")}</div></div>`;
-  }
-  html += "<hr>";
-
-  // Section 2: Site-specific properties
-  const skipKeys = new Set(["geometry", "_table", "_rank", "_score", "_title", "_signals", "opportunity_reason", "lng", "lat"]);
-  for (const [key, value] of Object.entries(result)) {
-    if (skipKeys.has(key) || key.startsWith("_") || value == null || value === "") continue;
-    const label = key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
-    let displayVal = value;
-    if (typeof value === "number") {
-      displayVal = key.includes("price") || key.includes("sale") || key.includes("valuation") ? `€${value.toLocaleString()}` : value.toLocaleString();
-    }
-    if (typeof value === "object") continue; // skip geometry/json objects
-    html += `<div class="detail-row"><div class="detail-label">${label}</div><div class="detail-value">${displayVal}</div></div>`;
-  }
-
-  // Section 3: Enrichment
-  html += buildEnrichmentHTML(enrichment);
-
-  flyoutContent.innerHTML = html;
-  openFlyout(result._title || "Site Detail");
+function buildVisualizeLinkHTML(result) {
+  if (!result.lng || !result.lat) return "";
+  const gmapsUrl = `https://www.google.com/maps/@${result.lat},${result.lng},18z`;
+  const osmUrl = `https://www.openstreetmap.org/?mlat=${result.lat}&mlon=${result.lng}#map=18/${result.lat}/${result.lng}`;
+  return `<div class="visualize-links">
+    <a href="${gmapsUrl}" target="_blank" rel="noopener" class="visualize-link">
+      <span class="visualize-icon">🗺️</span> Google Maps
+    </a>
+    <a href="${osmUrl}" target="_blank" rel="noopener" class="visualize-link">
+      <span class="visualize-icon">🌍</span> OpenStreetMap
+    </a>
+    <a href="https://www.google.com/maps/@${result.lat},${result.lng},500m/data=!3m1!1e3" target="_blank" rel="noopener" class="visualize-link">
+      <span class="visualize-icon">🛰️</span> Satellite
+    </a>
+  </div>`;
 }
 
-function showCommercialFlyout(result, enrichment) {
+function buildPlanningAnalysisHTML(enrichment) {
+  if (!enrichment) return "";
   let html = "";
 
-  // Score + Reason + Signals
-  if (result._score) {
-    const scoreColor = result._score >= 80 ? "#22c55e" : result._score >= 60 ? "#f59e0b" : "#888";
-    html += `<div class="detail-row"><div class="detail-label">Opportunity Score</div><div class="detail-value large" style="color:${scoreColor}">${result._score}/100</div></div>`;
+  const gs = enrichment.grants_summary;
+  const hasGrants = gs && gs.total_grants > 0;
+  const nearbyPlanning = enrichment.nearby_planning || [];
+
+  if (hasGrants || nearbyPlanning.length > 0) {
+    html += `<div class="enrichment-section">
+      <div class="enrichment-section-title" style="color:#22c55e">📋 Development Feasibility</div>`;
+
+    if (hasGrants) {
+      const ratio = gs.total_grants;
+      const unitText = gs.total_units_approved > 0 ? ` for ${gs.total_units_approved.toLocaleString()} total units` : "";
+      html += `<div class="detail-row"><div class="detail-label">Precedent</div><div class="detail-value" style="color:#22c55e;font-size:12px;line-height:1.4">${ratio} planning grant${ratio > 1 ? "s" : ""} within 500m in last 2 years${unitText}. This confirms strong development appetite in the area.</div></div>`;
+
+      // What you could build
+      const avgUnits = gs.total_units_approved > 0 && gs.total_grants > 0 ? Math.round(gs.total_units_approved / gs.total_grants) : null;
+      if (avgUnits) {
+        html += `<div class="detail-row"><div class="detail-label">Typical Scale</div><div class="detail-value">~${avgUnits} units per granted scheme nearby</div></div>`;
+      }
+    } else {
+      html += `<div class="detail-row"><div class="detail-label">Precedent</div><div class="detail-value" style="color:#f59e0b;font-size:12px">No recent grants within 500m — may need stronger planning case</div></div>`;
+    }
+
+    // Suggestion based on data
+    const hasRZLT = enrichment.rzlt_overlap && enrichment.rzlt_overlap.length > 0;
+    if (hasGrants && hasRZLT) {
+      html += `<div class="detail-row"><div class="detail-label">Suggestion</div><div class="detail-value" style="font-size:12px;line-height:1.4">RZLT pressure + planning precedent = strong acquisition case. Owner is paying 3% annual tax and nearby schemes have been approved. Approach with a credible planning pre-app.</div></div>`;
+    } else if (hasGrants) {
+      html += `<div class="detail-row"><div class="detail-label">Suggestion</div><div class="detail-value" style="font-size:12px;line-height:1.4">Strong planning precedent nearby. Consider pre-application consultation with the planning authority referencing nearby grant${gs.total_grants > 1 ? "s" : ""}.</div></div>`;
+    } else if (hasRZLT) {
+      html += `<div class="detail-row"><div class="detail-label">Suggestion</div><div class="detail-value" style="font-size:12px;line-height:1.4">RZLT-zoned site but limited recent grants nearby. May suit a smaller-scale development or consider a Part 8/SHD route.</div></div>`;
+    }
+
+    html += `</div>`;
   }
-  if (result.opportunity_reason) {
-    html += `<div class="detail-row"><div class="detail-label">Why</div><div class="detail-value" style="color:#22c55e;font-size:12px;line-height:1.4">${result.opportunity_reason}</div></div>`;
+
+  return html;
+}
+
+function showAiSiteIntelligence(result, enrichment) {
+  /**
+   * Unified "Site Intelligence" flyout for ALL AI result types.
+   * Adapts sections based on _table and available data.
+   * Mirrors the enriched parcel flyout but works for any entity.
+   */
+  const table = result._table || "unknown";
+  let html = "";
+
+  // ── Visualize links ──
+  html += buildVisualizeLinkHTML(result);
+
+  // ── Section 1: Opportunity Score Header ──
+  if (result._score) {
+    const scoreColor = result._score >= 85 ? "#22c55e" : result._score >= 70 ? "#3b82f6" : result._score >= 50 ? "#f59e0b" : "#888";
+    const scoreLabel = result._score >= 85 ? "Excellent" : result._score >= 70 ? "Strong" : result._score >= 50 ? "Moderate" : "Weak";
+    html += `<div class="opportunity-score-banner" style="border-left: 4px solid ${scoreColor}; background: ${scoreColor}15; padding: 10px 12px; margin-bottom: 12px; border-radius: 4px;">
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div>
+          <div style="font-size:11px; text-transform:uppercase; color:#999; letter-spacing:0.5px">Opportunity</div>
+          <div style="font-size:20px; font-weight:700; color:${scoreColor}">${result._score}<span style="font-size:13px;color:#888">/100</span> <span style="font-size:12px; font-weight:400; color:#999">${scoreLabel}</span></div>
+        </div>
+      </div>
+    </div>`;
   }
   if (result._signals && result._signals.length) {
-    html += `<div class="detail-row"><div class="detail-label">Signals</div><div class="detail-value">${result._signals.map(s => `<span class="signal-badge">${s}</span>`).join(" ")}</div></div>`;
+    html += `<div style="margin-bottom:12px">${result._signals.map(s => `<span class="signal-badge">${s}</span>`).join(" ")}</div>`;
   }
-  html += "<hr>";
-
-  // Commercial basics
-  html += `<div class="enrichment-section-title">Property Details</div>`;
-  if (result.address) html += `<div class="detail-row"><div class="detail-label">Address</div><div class="detail-value">${result.address}</div></div>`;
-  if (result.category) html += `<div class="detail-row"><div class="detail-label">Category</div><div class="detail-value">${result.category}</div></div>`;
-  if (result.uses) html += `<div class="detail-row"><div class="detail-label">Current Use</div><div class="detail-value" style="color:#f59e0b">${result.uses}</div></div>`;
-  if (result.valuation) html += `<div class="detail-row"><div class="detail-label">Valuation</div><div class="detail-value large">€${Number(result.valuation).toLocaleString()}</div></div>`;
-  if (result.total_floor_area) html += `<div class="detail-row"><div class="detail-label">Total Floor Area</div><div class="detail-value">${Number(result.total_floor_area).toLocaleString()} m²</div></div>`;
-  if (result.eircode) html += `<div class="detail-row"><div class="detail-label">Eircode</div><div class="detail-value">${result.eircode}</div></div>`;
-  if (result.local_authority) html += `<div class="detail-row"><div class="detail-label">Local Authority</div><div class="detail-value">${result.local_authority}</div></div>`;
-  if (result.car_park) html += `<div class="detail-row"><div class="detail-label">Car Park Spaces</div><div class="detail-value">${result.car_park}</div></div>`;
-
-  // Floor breakdown from floor_details JSONB
-  let floors = result.floor_details;
-  if (typeof floors === "string") {
-    try { floors = JSON.parse(floors); } catch(e) { floors = null; }
+  if (result.opportunity_reason) {
+    html += `<div style="color:#c0c0c0; font-size:12.5px; line-height:1.5; margin-bottom:14px; padding: 8px 10px; background:#ffffff08; border-radius:4px">${result.opportunity_reason}</div>`;
   }
-  if (floors && Array.isArray(floors) && floors.length > 0) {
-    html += `<div class="enrichment-section"><div class="enrichment-section-title">Floor Breakdown</div>`;
-    for (const f of floors) {
-      const navInfo = f.nav_per_m2 ? `€${f.nav_per_m2}/m²` : "";
-      html += `<div class="compact-row">
-        <span class="compact-main">${f.level || "—"}</span>
-        <span class="compact-secondary">${f.floor_use || "—"} · ${f.area ? f.area + "m²" : "—"}</span>
-        <span class="compact-badge">${navInfo}</span>
-      </div>`;
+
+  // ── Section 2: Site Details (table-specific) ──
+  html += buildSiteDetailsHTML(result, table);
+
+  // ── Section 3: Development Feasibility (from enrichment) ──
+  html += buildPlanningAnalysisHTML(enrichment);
+
+  // ── Section 4: RZLT Status ──
+  if (enrichment && enrichment.rzlt_overlap && enrichment.rzlt_overlap.length > 0) {
+    html += `<div class="enrichment-section">
+      <div class="rzlt-alert">RZLT Zone — 3% Annual Tax</div>`;
+    for (const r of enrichment.rzlt_overlap) {
+      html += `<div class="detail-row"><div class="detail-label">Zone</div><div class="detail-value">${r.zone_desc || r.zone_gzt || "—"}</div></div>`;
+      if (r.site_area) html += `<div class="detail-row"><div class="detail-label">RZLT Area</div><div class="detail-value">${r.site_area} ha</div></div>`;
     }
     html += `</div>`;
   }
 
-  // Enrichment sections
-  html += buildEnrichmentHTML(enrichment);
+  // ── Section 5: Zoning ──
+  if (enrichment && enrichment.zoning && enrichment.zoning.length > 0) {
+    html += `<div class="enrichment-section"><div class="enrichment-section-title">Zoning</div>`;
+    for (const z of enrichment.zoning) {
+      html += `<div class="detail-row"><div class="detail-label">${z.zone_code || "—"}</div><div class="detail-value">${z.zone_description || "—"}</div></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // ── Section 6: Recent Planning Grants (strongest dev signal) ──
+  if (enrichment) {
+    const gs = enrichment.grants_summary;
+    if (gs && gs.total_grants > 0) {
+      const unitText = gs.total_units_approved > 0 ? ` · ${gs.total_units_approved.toLocaleString()} units approved` : "";
+      const schemeText = gs.significant_schemes > 0 ? ` · ${gs.significant_schemes} major scheme${gs.significant_schemes > 1 ? "s" : ""}` : "";
+      html += `<div class="enrichment-section">
+        <div class="grants-banner">${gs.total_grants} Planning Grant${gs.total_grants > 1 ? "s" : ""} (Last 2 Years)${unitText}${schemeText}</div>`;
+      if (enrichment.recent_grants && enrichment.recent_grants.length > 0) {
+        for (const g of enrichment.recent_grants.slice(0, 5)) {
+          const desc = g.description ? (g.description.length > 100 ? g.description.substring(0, 100) + "…" : g.description) : "—";
+          const units = g.residential_units ? `${g.residential_units} unit${g.residential_units > 1 ? "s" : ""}` : "";
+          const area = g.floor_area ? `${g.floor_area.toLocaleString()}m²` : "";
+          const dist = g.distance_m != null ? `${g.distance_m}m` : "";
+          const datePart = g.decision_date || "";
+          const appType = g.application_type && !g.application_type.toLowerCase().includes("retention") ? "" : " (Retention)";
+          html += `<div class="grant-row">
+            <div class="grant-header">
+              <span class="grant-ref">${g.ref || "—"}${appType}</span>
+              <span class="grant-meta">${[units, area, dist].filter(Boolean).join(" · ")}</span>
+            </div>
+            <div class="grant-desc">${desc}</div>
+            ${datePart ? `<div class="grant-date">${datePart}</div>` : ""}
+          </div>`;
+        }
+      }
+      html += `</div>`;
+    } else {
+      html += `<div class="enrichment-section">
+        <div class="enrichment-section-title">Planning Grants <span class="enrichment-subtitle">(last 2 years)</span></div>
+        <p class="enrichment-empty">No granted applications within 500m in the last 2 years</p>
+      </div>`;
+    }
+  }
+
+  // ── Section 7: All Planning Activity (expandable) ──
+  if (enrichment && enrichment.nearby_planning && enrichment.nearby_planning.length > 0) {
+    const planId = `planning-details-${Date.now()}`;
+    html += `<div class="enrichment-section">
+      <div class="enrichment-section-title clickable" onclick="document.getElementById('${planId}').classList.toggle('collapsed')">
+        All Planning Activity <span class="enrichment-subtitle">(${enrichment.nearby_planning.length} within 500m)</span>
+        <span class="expand-arrow">▼</span>
+      </div>
+      <div id="${planId}" class="planning-details-list collapsed">`;
+    for (const pl of enrichment.nearby_planning) {
+      const desc = pl.description || "—";
+      const decision = pl.decision || "Pending";
+      const decUpper = decision.toUpperCase();
+      const decColor = decUpper.includes("GRANT") || decUpper.includes("CONDITIONAL") ? "#2ecc71" :
+                        decUpper.includes("REFUS") ? "#e74c3c" :
+                        decUpper.includes("WITHDRAW") ? "#888" : "#f59e0b";
+      const decLabel = decUpper.includes("GRANT") && !decUpper.includes("RETENTION") ? "GRANTED" :
+                        decUpper.includes("CONDITIONAL") ? "CONDITIONAL" :
+                        decUpper.includes("REFUS") ? "REFUSED" :
+                        decUpper.includes("RETENTION") ? "RETENTION" :
+                        decUpper.includes("WITHDRAW") ? "WITHDRAWN" : decision.substring(0, 15);
+      const dist = pl.distance_m != null ? `${pl.distance_m}m away` : "";
+      const datePart = pl.date || "";
+      html += `<div class="planning-detail-card">
+        <div class="planning-detail-header">
+          <span class="planning-ref">${pl.ref || "—"}</span>
+          <span class="planning-decision" style="background:${decColor}20;color:${decColor};border:1px solid ${decColor}40">${decLabel}</span>
+        </div>
+        <div class="planning-detail-desc">${desc.length > 120 ? desc.substring(0, 120) + "…" : desc}</div>
+        <div class="planning-detail-meta">${[datePart, dist, pl.source || ""].filter(Boolean).join(" · ")}</div>
+      </div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  // ── Section 8: Nearby Sales ──
+  if (enrichment) {
+    const sales = enrichment.nearby_sales;
+    if (sales && sales.count > 0) {
+      html += `<div class="enrichment-section">
+        <div class="enrichment-section-title">Nearby Sales <span class="enrichment-subtitle">(${sales.count} within 500m)</span></div>
+        <div class="detail-row"><div class="detail-label">Avg Price</div><div class="detail-value large" style="color:#e74c3c">€${sales.avg_sale_price.toLocaleString()}</div></div>
+        <div class="detail-row"><div class="detail-label">Median</div><div class="detail-value">€${sales.median_sale_price.toLocaleString()}</div></div>
+        <div class="detail-row"><div class="detail-label">Avg €/m²</div><div class="detail-value">${sales.avg_price_per_sqm ? "€" + sales.avg_price_per_sqm.toLocaleString() + "/m²" : "—"}</div></div>`;
+      if (sales.recent && sales.recent.length > 0) {
+        html += `<div class="compact-list-header">Recent Sales</div>`;
+        for (const s of sales.recent.slice(0, 5)) {
+          const addr = s.address ? (s.address.length > 35 ? s.address.substring(0, 35) + "…" : s.address) : "—";
+          const dist = s.distance_m != null ? `${s.distance_m}m` : "";
+          html += `<div class="compact-row">
+            <span class="compact-main">€${s.sale_price ? s.sale_price.toLocaleString() : "—"}</span>
+            <span class="compact-secondary">${addr}</span>
+            <span class="compact-badge">${dist}</span>
+          </div>`;
+        }
+      }
+      html += `</div>`;
+    }
+  }
+
+  // ── Section 9: Demographics ──
+  if (enrichment && enrichment.census) {
+    const c = enrichment.census;
+    const ownerPct = c.owner_occupied_pct || 0;
+    const rentPct = c.rented_pct || 0;
+    const otherPct = Math.max(0, 100 - ownerPct - rentPct);
+    html += `<div class="enrichment-section">
+      <div class="enrichment-section-title">Demographics <span class="enrichment-subtitle">(Census 2022)</span></div>
+      <div class="detail-row"><div class="detail-label">Population</div><div class="detail-value" style="color:#00bcd4">${c.total_population ? c.total_population.toLocaleString() : "—"}</div></div>
+      <div class="detail-row"><div class="detail-label">Density</div><div class="detail-value">${c.population_density ? Math.round(c.population_density).toLocaleString() + " / km²" : "—"}</div></div>
+      <div class="detail-row"><div class="detail-label">Tenure</div></div>
+      <div class="tenure-bar">
+        <div class="tenure-segment owner" style="width:${ownerPct}%" title="Owner ${ownerPct}%"></div>
+        <div class="tenure-segment rented" style="width:${rentPct}%" title="Rented ${rentPct}%"></div>
+        <div class="tenure-segment other" style="width:${otherPct}%"></div>
+      </div>
+      <div class="tenure-legend">
+        <span><span class="legend-dot owner"></span>Owner ${ownerPct}%</span>
+        <span><span class="legend-dot rented"></span>Rented ${rentPct}%</span>
+      </div>
+      <div class="detail-row"><div class="detail-label">Vacancy</div><div class="detail-value" style="color:${c.vacancy_rate > 10 ? '#e74c3c' : c.vacancy_rate > 5 ? '#f59e0b' : '#2ecc71'}">${c.vacancy_rate != null ? c.vacancy_rate + "%" : "—"}</div></div>
+      <div class="detail-row"><div class="detail-label">Employment</div><div class="detail-value">${c.employment_rate != null ? c.employment_rate + "%" : "—"}</div></div>
+      <div class="detail-row"><div class="detail-label">3rd Level Edu</div><div class="detail-value">${c.third_level_pct != null ? c.third_level_pct + "%" : "—"}</div></div>
+    </div>`;
+  }
+
+  // ── Section 10: Commercial Context ──
+  if (enrichment && enrichment.commercial) {
+    html += `<div class="enrichment-section"><div class="enrichment-section-title">Commercial Activity</div>
+      <div class="detail-row"><div class="detail-label">Nearby</div><div class="detail-value">${enrichment.commercial.count} properties</div></div>
+      <div class="detail-row"><div class="detail-label">Categories</div><div class="detail-value" style="font-size:11px">${enrichment.commercial.categories || "—"}</div></div>
+      <div class="detail-row"><div class="detail-label">Avg Valuation</div><div class="detail-value">€${enrichment.commercial.avg_valuation.toLocaleString()}</div></div>
+    </div>`;
+  }
 
   flyoutContent.innerHTML = html;
-  openFlyout(result._title || "Commercial Property");
+  openFlyout(result._title || "Site Intelligence");
+}
+
+
+function buildSiteDetailsHTML(result, table) {
+  /**
+   * Table-specific site details section.
+   * Shows the most relevant fields for each entity type, properly formatted.
+   */
+  let html = `<div class="enrichment-section"><div class="enrichment-section-title">Site Details</div>`;
+
+  if (table === "commercial_valuations") {
+    if (result.address) html += `<div class="detail-row"><div class="detail-label">Address</div><div class="detail-value">${result.address}</div></div>`;
+    if (result.category) html += `<div class="detail-row"><div class="detail-label">Category</div><div class="detail-value">${result.category}</div></div>`;
+    if (result.uses) html += `<div class="detail-row"><div class="detail-label">Current Use</div><div class="detail-value" style="color:#f59e0b">${result.uses}</div></div>`;
+    if (result.valuation) html += `<div class="detail-row"><div class="detail-label">Valuation</div><div class="detail-value large">€${Number(result.valuation).toLocaleString()}</div></div>`;
+    if (result.total_floor_area) html += `<div class="detail-row"><div class="detail-label">Floor Area</div><div class="detail-value">${Number(result.total_floor_area).toLocaleString()} m²</div></div>`;
+    if (result.valuation && result.total_floor_area && result.total_floor_area > 0) {
+      const valPerSqm = Math.round(result.valuation / result.total_floor_area);
+      html += `<div class="detail-row"><div class="detail-label">Valuation/m²</div><div class="detail-value">€${valPerSqm.toLocaleString()}/m²</div></div>`;
+    }
+    if (result.eircode) html += `<div class="detail-row"><div class="detail-label">Eircode</div><div class="detail-value">${result.eircode}</div></div>`;
+    if (result.local_authority) html += `<div class="detail-row"><div class="detail-label">Authority</div><div class="detail-value">${result.local_authority}</div></div>`;
+    if (result.car_park) html += `<div class="detail-row"><div class="detail-label">Parking</div><div class="detail-value">${result.car_park} spaces</div></div>`;
+
+    // Floor breakdown
+    let floors = result.floor_details;
+    if (typeof floors === "string") { try { floors = JSON.parse(floors); } catch(e) { floors = null; } }
+    if (floors && Array.isArray(floors) && floors.length > 0) {
+      html += `<div class="compact-list-header" style="margin-top:8px">Floor Breakdown</div>`;
+      for (const f of floors) {
+        const navInfo = f.nav_per_m2 ? `€${f.nav_per_m2}/m²` : "";
+        html += `<div class="compact-row">
+          <span class="compact-main">${f.level || "—"}</span>
+          <span class="compact-secondary">${f.floor_use || "—"} · ${f.area ? f.area + "m²" : "—"}</span>
+          <span class="compact-badge">${navInfo}</span>
+        </div>`;
+      }
+    }
+  } else if (table === "rzlt") {
+    if (result.zone_desc) html += `<div class="detail-row"><div class="detail-label">Zone</div><div class="detail-value">${result.zone_desc}</div></div>`;
+    if (result.site_area != null) {
+      const ha = Number(result.site_area);
+      const sqm = ha < 10 ? `${(ha * 10000).toLocaleString()} m²` : `${ha.toLocaleString()} ha`;
+      html += `<div class="detail-row"><div class="detail-label">Site Area</div><div class="detail-value large">${sqm}</div></div>`;
+      if (ha > 0) html += `<div class="detail-row"><div class="detail-label">Hectares</div><div class="detail-value">${ha} ha</div></div>`;
+    }
+    if (result.local_authority_name) html += `<div class="detail-row"><div class="detail-label">Authority</div><div class="detail-value">${result.local_authority_name}</div></div>`;
+    if (result.zone_gzt) html += `<div class="detail-row"><div class="detail-label">GZT Zone</div><div class="detail-value">${result.zone_gzt}</div></div>`;
+  } else if (table === "sold_properties") {
+    if (result.address) html += `<div class="detail-row"><div class="detail-label">Address</div><div class="detail-value">${result.address}</div></div>`;
+    if (result.sale_price) html += `<div class="detail-row"><div class="detail-label">Sale Price</div><div class="detail-value large" style="color:#e74c3c">€${Number(result.sale_price).toLocaleString()}</div></div>`;
+    if (result.sale_date) html += `<div class="detail-row"><div class="detail-label">Sale Date</div><div class="detail-value">${result.sale_date}</div></div>`;
+    if (result.property_type) html += `<div class="detail-row"><div class="detail-label">Type</div><div class="detail-value">${result.property_type}</div></div>`;
+    if (result.floor_area_m2) html += `<div class="detail-row"><div class="detail-label">Floor Area</div><div class="detail-value">${Number(result.floor_area_m2).toLocaleString()} m²</div></div>`;
+    if (result.sale_price && result.floor_area_m2 && result.floor_area_m2 > 0) {
+      const pricePerSqm = Math.round(result.sale_price / result.floor_area_m2);
+      html += `<div class="detail-row"><div class="detail-label">Price/m²</div><div class="detail-value">€${pricePerSqm.toLocaleString()}/m²</div></div>`;
+    }
+    if (result.beds) html += `<div class="detail-row"><div class="detail-label">Beds</div><div class="detail-value">${result.beds}</div></div>`;
+    if (result.baths) html += `<div class="detail-row"><div class="detail-label">Baths</div><div class="detail-value">${result.baths}</div></div>`;
+    if (result.ber_rating) html += `<div class="detail-row"><div class="detail-label">BER</div><div class="detail-value">${result.ber_rating}</div></div>`;
+  } else if (table === "cadastral_freehold" || table === "cadastral_leasehold") {
+    const typeLabel = table === "cadastral_leasehold" ? "Leasehold" : "Freehold";
+    const typeColor = table === "cadastral_leasehold" ? "#6495ed" : "#ff8c00";
+    html += `<div class="detail-row"><div class="detail-label">Type</div><div class="detail-value" style="color:${typeColor}">${typeLabel}</div></div>`;
+    if (result.area_sqm) html += `<div class="detail-row"><div class="detail-label">Area</div><div class="detail-value large">${Number(result.area_sqm).toLocaleString()} m²</div></div>`;
+    if (result.nationalcadastralreference) html += `<div class="detail-row"><div class="detail-label">Cadastral Ref</div><div class="detail-value">${result.nationalcadastralreference}</div></div>`;
+  } else if (table === "national_planning_polygons" || table === "national_planning_points") {
+    if (result.developmentaddress) html += `<div class="detail-row"><div class="detail-label">Address</div><div class="detail-value">${result.developmentaddress}</div></div>`;
+    if (result.applicationnumber) html += `<div class="detail-row"><div class="detail-label">Ref</div><div class="detail-value">${result.applicationnumber}</div></div>`;
+    if (result.decision) {
+      const decUpper = result.decision.toUpperCase();
+      const decColor = decUpper.includes("GRANT") || decUpper.includes("CONDITIONAL") ? "#2ecc71" : decUpper.includes("REFUS") ? "#e74c3c" : "#f59e0b";
+      html += `<div class="detail-row"><div class="detail-label">Decision</div><div class="detail-value" style="color:${decColor}">${result.decision}</div></div>`;
+    }
+    if (result.developmentdescription) {
+      const desc = result.developmentdescription.length > 200 ? result.developmentdescription.substring(0, 200) + "…" : result.developmentdescription;
+      html += `<div class="detail-row"><div class="detail-label">Description</div><div class="detail-value" style="font-size:12px;line-height:1.4">${desc}</div></div>`;
+    }
+    if (result.numresidentialunits) html += `<div class="detail-row"><div class="detail-label">Res. Units</div><div class="detail-value large" style="color:#22c55e">${result.numresidentialunits}</div></div>`;
+    if (result.areaofsite) html += `<div class="detail-row"><div class="detail-label">Site Area</div><div class="detail-value">${Number(result.areaofsite).toLocaleString()} m²</div></div>`;
+    if (result.floorarea) html += `<div class="detail-row"><div class="detail-label">Floor Area</div><div class="detail-value">${Number(result.floorarea).toLocaleString()} m²</div></div>`;
+    if (result.planningauthority) html += `<div class="detail-row"><div class="detail-label">Authority</div><div class="detail-value">${result.planningauthority}</div></div>`;
+  } else {
+    // Generic fallback — show all non-internal fields
+    const skipKeys = new Set([
+      "geometry", "geom", "_table", "_rank", "_score", "_title", "_signals",
+      "opportunity_reason", "lng", "lat", "ogc_fid", "gml_id", "osm_id",
+      "floor_details", "nearby_grants", "max_residential_units", "grant_refs",
+    ]);
+    for (const [key, value] of Object.entries(result)) {
+      if (skipKeys.has(key) || key.startsWith("_") || value == null || value === "") continue;
+      if (typeof value === "object") continue;
+      const label = key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+      let displayVal = value;
+      if (typeof value === "number") {
+        if (key.includes("price") || key === "valuation") displayVal = `€${value.toLocaleString()}`;
+        else if (key.includes("area")) displayVal = `${value.toLocaleString()} m²`;
+        else displayVal = value.toLocaleString();
+      }
+      html += `<div class="detail-row"><div class="detail-label">${label}</div><div class="detail-value">${displayVal}</div></div>`;
+    }
+  }
+
+  // Show nearby_grants from the SQL cross-reference if available
+  if (result.nearby_grants != null && Number(result.nearby_grants) > 0) {
+    const ng = Number(result.nearby_grants);
+    const color = ng >= 3 ? "#22c55e" : ng >= 1 ? "#3b82f6" : "#888";
+    html += `<div class="detail-row" style="margin-top:6px"><div class="detail-label">SQL Grants</div><div class="detail-value" style="color:${color}">${ng} grant${ng > 1 ? "s" : ""} within 500m</div></div>`;
+    if (result.grant_refs) html += `<div class="detail-row"><div class="detail-label">Refs</div><div class="detail-value" style="font-size:11px">${result.grant_refs}</div></div>`;
+    if (result.max_residential_units) html += `<div class="detail-row"><div class="detail-label">Max Units</div><div class="detail-value">${result.max_residential_units} units (largest nearby)</div></div>`;
+  }
+
+  html += `</div>`;
+  return html;
 }
 
 function clearAiMarkers() {
