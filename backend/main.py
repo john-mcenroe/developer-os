@@ -2642,10 +2642,16 @@ Example pattern:
   ORDER BY c.area_sqm DESC LIMIT 25;
 NOTE: For neighbor_count, use a lateral join or subquery with ST_Touches — but always include a spatial filter on the outer table first to avoid full scans."""
 
-HYPOTHESIS_PROMPT = f"""You are LandOS AI, an expert Dublin property & land development analyst.
+HYPOTHESIS_PROMPT = f"""You are LandOS AI, an expert Irish property & land development analyst.
 The user is a property developer. They ask questions. You answer them by forming hypotheses and writing SQL to test them.
 
 YOUR TASK: Given the user's question, form 3-5 distinct hypotheses about where opportunities might exist, and write PostGIS SQL to test each one.
+
+CRITICAL — GETTING RESULTS IS THE #1 PRIORITY:
+- It is MUCH better to return results with loose filters than to return 0 results with perfect filters.
+- Start with simple, broad queries. Only add restrictive WHERE clauses if the user specifically asks for constraints.
+- If the user asks about an area OUTSIDE Dublin (e.g. Maynooth, Greystones, Wicklow, Navan), ONLY use nationally-available tables: rzlt, national_planning_polygons, national_planning_points, sold_properties. Do NOT use cadastral_freehold, cadastral_leasehold, osm_buildings, commercial_valuations, census_small_areas, or zoning — they only have Dublin data.
+- For RZLT queries: site_area is in HECTARES. For "mid-sized" residential, use site_area BETWEEN 0.05 AND 5 (500sqm to 5ha). Do NOT use sqm-scale filters like area > 150.
 
 {DB_SCHEMA_PROMPT}
 
@@ -2693,20 +2699,19 @@ HYPOTHESIS GUIDELINES:
   * Undervalued commercial (low valuation relative to floor area) = redevelopment potential
   * Multiple commercial uses on one site (e.g. office + restaurant) = complex site with conversion potential
   * Commercial sites near recent residential planning grants = proven change-of-use precedent
-- PLANNING PRECEDENT (CRITICAL): For ANY site search query, ALWAYS include at least one hypothesis that cross-references with recent planning grants. Planning precedent is the strongest signal for development viability. Use patterns like:
-  * Find candidate sites (from cadastral/RZLT/commercial) that have granted residential planning applications within 500m in the last 2 years: JOIN national_planning_polygons np ON ST_DWithin(candidate.geom::geography, np.geom::geography, 500) WHERE (UPPER(np.decision) LIKE '%%GRANT%%' OR UPPER(np.decision) LIKE '%%CONDITIONAL%%') AND to_timestamp(np.decisiondate/1000) > NOW() - INTERVAL '2 years' AND np.numresidentialunits > 0
-  * Count nearby grants and include as a column: e.g. "nearby_grants_2yr" — sites with more nearby grants score higher
-  * Filter for large residential schemes: np.numresidentialunits >= 5 finds significant housing developments (not just extensions)
-  * Include grant details in SELECT: np.applicationnumber, np.numresidentialunits, np.developmentdescription (truncated) — these appear in the developer's result card
-  * Decision values for grants: UPPER(decision) LIKE '%%GRANT%%' OR UPPER(decision) LIKE '%%CONDITIONAL%%' (captures 'CONDITIONAL', 'GRANT PERMISSION', 'Granted (Conditional)')
-  * ALWAYS use spatial filter (bbox + ST_DWithin) on national_planning_polygons — it has 483k rows
+- PLANNING PRECEDENT: Include one hypothesis querying recent planning grants. But keep it SIMPLE — a standalone query on national_planning_polygons is better than a complex cross-table join that returns 0 rows.
+  * Simple approach (PREFERRED): Query national_planning_polygons directly for the area with spatial filter + grant decision filter. This always returns results if there are grants.
+  * Cross-reference approach (ONLY if simple queries succeed): Join RZLT/cadastral with planning grants within 500m.
+  * Decision filter: UPPER(decision) LIKE '%%GRANT%%' OR UPPER(decision) LIKE '%%CONDITIONAL%%'
+  * Date filter: to_timestamp(decisiondate/1000) > NOW() - INTERVAL '2 years'
+  * ALWAYS use bbox spatial filter on national_planning_polygons (483k rows)
 
-RESULT QUALITY FILTERS (apply in SQL WHERE clauses):
-- For RESIDENTIAL site queries on cadastral tables: always add area_sqm >= 150 (minimum viable residential plot)
-- For any cadastral query: add area_sqm >= 100 to filter out road slivers and infrastructure strips
-- To exclude elongated road parcels, add a compactness filter: 4 * PI() * ST_Area(ST_Transform(geom, 2157)) / NULLIF(POWER(ST_Perimeter(ST_Transform(geom, 2157)), 2), 0) > 0.05
-- For commercial_valuations queries: always SELECT floor_details, valuation, uses, category, total_floor_area — these are critical for developer assessment
-- When querying commercial_valuations for change-of-use opportunities, cross-reference with nearby planning grants (national_planning_polygons with decision LIKE '%Grant%') within 500m to find precedent
+RESULT QUALITY FILTERS (apply ONLY to cadastral queries in Dublin — do NOT over-filter):
+- For cadastral queries: area_sqm >= 100 to skip road slivers (ONLY when querying cadastral_freehold/leasehold)
+- Compactness filter is OPTIONAL — only add if the user specifically asks for buildable/regular shaped plots
+- For commercial_valuations queries: always SELECT floor_details, valuation, uses, category, total_floor_area
+- IMPORTANT: Do NOT add quality filters to RZLT, national_planning, or sold_properties queries — these tables have clean data and filters cause 0 results
+- For RZLT: site_area is in HECTARES. Use site_area > 0.05 at most (500sqm minimum). Do NOT filter by compactness.
 
 QUERY PLAN OPTION (use for simple single-table queries):
 For straightforward single-table queries with filters, you may use a structured "query_plan" instead of raw SQL.
@@ -3641,12 +3646,13 @@ def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
         if not row.get("lng") and not row.get("lat"):
             continue
 
-        # Post-processing filter: reject non-buildable results
-        area_val = row.get("area_sqm") or row.get("site_area")
-        if area_val is not None:
+        # Post-processing filter: reject non-buildable results (cadastral only)
+        # Only filter area_sqm (which is in sqm) — do NOT filter site_area (which is in hectares for RZLT)
+        area_sqm = row.get("area_sqm")
+        if area_sqm is not None:
             try:
-                if float(area_val) < 100:
-                    continue  # Skip tiny parcels (road slivers, etc.)
+                if float(area_sqm) < 80:
+                    continue  # Skip tiny cadastral parcels (road slivers)
             except (ValueError, TypeError):
                 pass
 
