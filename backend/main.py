@@ -2717,7 +2717,7 @@ HYPOTHESIS GUIDELINES:
     -- Your main site query (RZLT, cadastral, commercial, etc.)
     SELECT r.*, r.geom
     FROM rzlt r
-    WHERE ST_Intersects(r.geom, ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}, 4326))
+    WHERE ST_Intersects(r.geom, ST_MakeEnvelope({{xmin}}, {{ymin}}, {{xmax}}, {{ymax}}, 4326))
     AND r.site_area > 0.05
     LIMIT 25
   ),
@@ -2725,7 +2725,7 @@ HYPOTHESIS GUIDELINES:
     -- FIRST filter planning to bbox area (fast index scan), THEN spatial join
     SELECT np.*
     FROM national_planning_polygons np
-    WHERE np.geom && ST_Expand(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}, 4326), 0.01)
+    WHERE np.geom && ST_Expand(ST_MakeEnvelope({{xmin}}, {{ymin}}, {{xmax}}, {{ymax}}, 4326), 0.01)
       AND (UPPER(np.decision) LIKE '%%GRANT%%' OR UPPER(np.decision) LIKE '%%CONDITIONAL%%')
       AND to_timestamp(np.decisiondate/1000) > NOW() - INTERVAL '3 years'
   ),
