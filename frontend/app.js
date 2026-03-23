@@ -2847,15 +2847,26 @@ function handleSSEEvent(eventType, data, loadingEl, stageTimers) {
       stageTimers.forEach(clearTimeout);
       let text = `Formed ${data.count} hypothesis${data.count !== 1 ? "es" : ""}`;
       updateThinkingPhase(loadingEl, 1, "done", text);
-      // Show hypothesis names as sub-list
+      // Show hypothesis names with expandable rationale
       const phase1 = loadingEl.querySelector("[data-phase='1']");
       if (phase1 && data.names && data.names.length > 0) {
         const list = document.createElement("div");
         list.className = "thinking-hypothesis-list";
-        data.names.forEach((name) => {
+        data.names.forEach((name, i) => {
           const item = document.createElement("div");
           item.className = "thinking-hypothesis-item";
-          item.textContent = `· ${name}`;
+          item.innerHTML = `<span class="hypothesis-name">· ${name}</span>`;
+          if (data.rationales && data.rationales[i]) {
+            const rationale = document.createElement("div");
+            rationale.className = "hypothesis-rationale";
+            rationale.textContent = data.rationales[i];
+            rationale.style.display = "none";
+            item.appendChild(rationale);
+            item.style.cursor = "pointer";
+            item.addEventListener("click", () => {
+              rationale.style.display = rationale.style.display === "none" ? "block" : "none";
+            });
+          }
           list.appendChild(item);
         });
         phase1.appendChild(list);
@@ -2886,8 +2897,20 @@ function handleSSEEvent(eventType, data, loadingEl, stageTimers) {
     case "query_complete": {
       const total = data.hypothesis_total || 1;
       const hIdx = (data.hypothesis_index || 0) + 1;
+      const rowCount = data.row_count || 0;
       updateThinkingPhase(loadingEl, 2, "active",
         `Testing hypothesis ${hIdx}/${total}: ${data.description || ""}...`);
+      // Show result snippet as sub-line
+      if (rowCount > 0) {
+        const phase2El = loadingEl.querySelector("[data-phase='2']");
+        if (phase2El) {
+          const snippetLine = document.createElement("div");
+          snippetLine.className = "thinking-tool-action";
+          const snippetText = data.snippet ? ` — ${data.snippet}` : "";
+          snippetLine.innerHTML = `<span class="tool-icon">&#x2713;</span> ${rowCount} result${rowCount !== 1 ? "s" : ""}${snippetText}`;
+          phase2El.appendChild(snippetLine);
+        }
+      }
       break;
     }
     case "result": {

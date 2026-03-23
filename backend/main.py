@@ -4016,6 +4016,7 @@ async def ai_chat_stream(req: ChatRequest):
         yield sse("hypotheses", {
             "count": len(hypotheses),
             "names": [h.get("name", "") for h in hypotheses],
+            "rationales": [h.get("rationale", "") for h in hypotheses],
         })
 
         # Phase 2: Execute hypotheses in parallel
@@ -4114,6 +4115,30 @@ async def ai_chat_stream(req: ChatRequest):
                             # Create a small buffer circle for points (visual area)
                             preview_features.append(geom)
 
+                    # Build a one-line data snippet from the first result row
+                    snippet = ""
+                    rows = result.get("rows", [])
+                    if rows:
+                        first = rows[0]
+                        parts = []
+                        for key in ("address", "nationalcadastralreference", "zone_desc", "uses", "developmentdescription"):
+                            if key in first and first[key]:
+                                parts.append(str(first[key])[:40])
+                                break
+                        if first.get("area_sqm"):
+                            try: parts.append(f"{float(first['area_sqm']):,.0f}sqm")
+                            except (ValueError, TypeError): pass
+                        elif first.get("total_floor_area"):
+                            try: parts.append(f"{float(first['total_floor_area']):,.0f}sqm")
+                            except (ValueError, TypeError): pass
+                        if first.get("sale_price"):
+                            try: parts.append(f"€{float(first['sale_price']):,.0f}")
+                            except (ValueError, TypeError): pass
+                        elif first.get("valuation"):
+                            try: parts.append(f"val €{float(first['valuation']):,.0f}")
+                            except (ValueError, TypeError): pass
+                        snippet = " · ".join(parts)
+
                     await event_queue.put(("query_complete", {
                         "hypothesis_index": h_idx,
                         "query_index": q_idx,
@@ -4122,6 +4147,7 @@ async def ai_chat_stream(req: ChatRequest):
                         "row_count": result["row_count"],
                         "description": query.get("description", ""),
                         "preview_features": preview_features,
+                        "snippet": snippet,
                     }))
 
         # Launch all hypotheses in parallel
