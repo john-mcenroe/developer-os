@@ -161,6 +161,18 @@ export const LAYER_CONFIGS: LayerConfig[] = [
     group: 'boundaries',
   },
 
+  // Commercial
+  {
+    id: 'commercial_valuations',
+    label: 'Commercial Properties',
+    color: '#e91e63',
+    minZoom: 14,
+    defaultVisible: false,
+    endpoint: '/api/commercial_valuations',
+    sourceId: 'commercial_valuations',
+    group: 'poi',
+  },
+
   // Risk & Heritage
   {
     id: 'flood_zones',
