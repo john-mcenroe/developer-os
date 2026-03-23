@@ -2612,6 +2612,11 @@ HYPOTHESIS GUIDELINES:
 - Hypotheses should be specific and testable, not vague
 - If no location is specified, pick 2-3 promising Dublin areas or search city-wide
 - For side site / infill / gap site queries, use the SIDE SITE DETECTION PATTERNS above — combine shape analysis (compactness), size filtering, adjacency, planning history, and RZLT overlap
+- COMMERCIAL OPPORTUNITIES: For any site/development query, ALWAYS include at least one hypothesis querying commercial_valuations. Commercial properties (offices, retail, warehouses, restaurants) are HIGH VALUE change-of-use targets. Look for:
+  * Small commercial sites (100-500sqm) in residential areas = change-of-use to housing
+  * Undervalued commercial (low valuation relative to floor area) = redevelopment potential
+  * Multiple commercial uses on one site (e.g. office + restaurant) = complex site with conversion potential
+  * Commercial sites near recent residential planning grants = proven change-of-use precedent
 
 RESULT QUALITY FILTERS (apply in SQL WHERE clauses):
 - For RESIDENTIAL site queries on cadastral tables: always add area_sqm >= 150 (minimum viable residential plot)

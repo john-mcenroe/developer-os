@@ -1409,36 +1409,61 @@ function showSdPlanningFlyout(data) {
 function showRzltFlyout(data) {
   const area = data.site_area ? `${Number(data.site_area).toLocaleString()}` : "—";
 
+  // Score + reason (if from AI result)
+  let aiSection = "";
+  if (data._score) {
+    const scoreColor = data._score >= 80 ? "#22c55e" : data._score >= 60 ? "#f59e0b" : "#888";
+    aiSection += `<div class="detail-row"><div class="detail-label">Opportunity Score</div><div class="detail-value large" style="color:${scoreColor}">${data._score}/100</div></div>`;
+  }
+  if (data.opportunity_reason) {
+    aiSection += `<div class="detail-row"><div class="detail-label">Why</div><div class="detail-value" style="color:#22c55e;font-size:12px;line-height:1.4">${data.opportunity_reason}</div></div>`;
+  }
+  if (data._signals && data._signals.length) {
+    aiSection += `<div class="detail-row"><div class="detail-label">Signals</div><div class="detail-value">${data._signals.map(s => `<span class="signal-badge">${s}</span>`).join(" ")}</div></div>`;
+  }
+  if (aiSection) aiSection += "<hr>";
+
   flyoutContent.innerHTML = `
+    ${aiSection}
+    <div class="rzlt-alert">RZLT Site — 3% Annual Tax</div>
     <div class="detail-row">
-      <div class="detail-label">Zone Description</div>
+      <div class="detail-label">Zone</div>
       <div class="detail-value large" style="color:#ff6b6b">${data.zone_desc || "—"}</div>
     </div>
     <div class="detail-row">
       <div class="detail-label">Site Area</div>
       <div class="detail-value">${area} m²</div>
     </div>
-    <hr>
     <div class="detail-row">
       <div class="detail-label">Zone GZT</div>
       <div class="detail-value">${data.zone_gzt || "—"}</div>
     </div>
     <div class="detail-row">
-      <div class="detail-label">GZT Description</div>
-      <div class="detail-value" style="font-size:0.85em;line-height:1.4">${data.gzt_desc || "—"}</div>
-    </div>
-    <div class="detail-row">
       <div class="detail-label">Local Authority</div>
       <div class="detail-value">${data.local_authority_name || "—"}</div>
     </div>
-    <hr>
-    <div class="detail-row">
-      <div class="detail-label" style="color:#ff6b6b">RZLT Status</div>
-      <div class="detail-value" style="color:#ff6b6b;font-size:12px;line-height:1.4">Subject to 3% annual Residential Zoned Land Tax — strong motivated seller signal</div>
-    </div>
+    <div id="rzlt-enrichment-placeholder" style="color:#666;font-size:11px;padding:8px 0">Loading nearby context...</div>
   `;
 
-  openFlyout("RZLT Site");
+  openFlyout(data._title || "RZLT Site");
+
+  // Fetch enrichment data for planning precedent, sales, etc.
+  const lng = data.lng || (data.geometry && data.geometry.coordinates ? data.geometry.coordinates[0] : null);
+  const lat = data.lat || (data.geometry && data.geometry.coordinates ? data.geometry.coordinates[1] : null);
+  if (lng && lat) {
+    fetchEnrichment(lng, lat).then(enrichment => {
+      const placeholder = document.getElementById("rzlt-enrichment-placeholder");
+      if (placeholder) {
+        placeholder.outerHTML = buildEnrichmentHTML(enrichment);
+      }
+    }).catch(() => {
+      const placeholder = document.getElementById("rzlt-enrichment-placeholder");
+      if (placeholder) placeholder.remove();
+    });
+  } else {
+    const placeholder = document.getElementById("rzlt-enrichment-placeholder");
+    if (placeholder) placeholder.remove();
+  }
 }
 
 // ── Census Small Area click handler ──────────────────────────────────────────
