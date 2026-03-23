@@ -3312,6 +3312,203 @@ def determine_object_type(evaluation: dict, results: list[dict]) -> tuple[str, l
     return obj_type, available_views, choropleth_metric, heatmap_weight_column
 
 
+class AreaAnalysisRequest(BaseModel):
+    lng: float
+    lat: float
+    radius: float  # metres
+    query: str = ""  # optional follow-up question
+
+
+@app.post("/api/ai/area_analysis")
+async def ai_area_analysis(req: AreaAnalysisRequest):
+    """AI-powered area analysis for a drawn circle on the map."""
+    from starlette.responses import StreamingResponse
+
+    async def generate():
+        def sse(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+        yield sse("status", {"phase": "gathering", "message": "Gathering area data..."})
+
+        # ── 1. Gather all data within the circle ──────────────────────
+        conn = get_conn()
+        context_parts = []
+        center_sql = f"ST_Transform(ST_SetSRID(ST_MakePoint({req.lng}, {req.lat}), 4326), 2157)"
+        dwithin = f"ST_DWithin(ST_Transform(geom, 2157), {center_sql}, {req.radius})"
+
+        try:
+            with conn.cursor() as cur:
+                # Census demographics
+                cur.execute(f"""
+                    SELECT COUNT(*), COALESCE(SUM(total_population),0),
+                           COALESCE(ROUND(AVG(vacancy_rate)::numeric,1),0),
+                           COALESCE(ROUND(AVG(apartment_pct)::numeric,1),0),
+                           COALESCE(ROUND(AVG(owner_occupied_pct)::numeric,1),0),
+                           COALESCE(ROUND(AVG(rented_pct)::numeric,1),0),
+                           COALESCE(ROUND(AVG(third_level_pct)::numeric,1),0),
+                           COALESCE(ROUND(AVG(population_density)::numeric,0),0),
+                           COALESCE(ROUND(AVG(employment_rate)::numeric,1),0)
+                    FROM census_small_areas WHERE {dwithin}
+                """)
+                row = cur.fetchone()
+                if row and row[0] > 0:
+                    context_parts.append(f"DEMOGRAPHICS: {row[1]} people, density {row[7]}/km², vacancy {row[2]}%, apartments {row[3]}%, owner-occupied {row[4]}%, rented {row[5]}%, 3rd-level education {row[6]}%, employment rate {row[8]}%")
+
+                # Sold properties
+                cur.execute(f"""
+                    SELECT COUNT(*), COALESCE(ROUND(AVG(sale_price)),0),
+                           COALESCE(ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY sale_price)),0),
+                           MIN(sale_price), MAX(sale_price)
+                    FROM sold_properties WHERE sale_price > 0 AND {dwithin}
+                """)
+                row = cur.fetchone()
+                if row and row[0] > 0:
+                    context_parts.append(f"SOLD PROPERTIES: {row[0]} sales, avg €{row[1]:,.0f}, median €{row[2]:,.0f}, range €{row[3]:,.0f}-€{row[4]:,.0f}")
+
+                # RZLT sites
+                cur.execute(f"SELECT COUNT(*), COALESCE(ROUND(SUM(site_area)::numeric,0),0) FROM rzlt WHERE {dwithin}")
+                row = cur.fetchone()
+                if row and row[0] > 0:
+                    context_parts.append(f"RZLT SITES: {row[0]} sites totalling {row[1]:,.0f} sqm (3% annual tax on residentially zoned undeveloped land)")
+
+                # Planning applications
+                cur.execute(f"""
+                    SELECT COUNT(*),
+                           COUNT(*) FILTER (WHERE UPPER(COALESCE(decision,'')) LIKE '%%GRANT%%'),
+                           COUNT(*) FILTER (WHERE UPPER(COALESCE(decision,'')) LIKE '%%REFUS%%')
+                    FROM national_planning_polygons WHERE {dwithin}
+                """)
+                row = cur.fetchone()
+                if row and row[0] > 0:
+                    context_parts.append(f"PLANNING: {row[0]} applications ({row[1]} granted, {row[2]} refused)")
+
+                # Zoning
+                cur.execute(f"""
+                    SELECT zone_code, zone_description, COUNT(*)
+                    FROM zoning WHERE ST_Intersects(geom, ST_Buffer({center_sql}::geography, {req.radius})::geometry)
+                    GROUP BY 1,2 ORDER BY COUNT(*) DESC LIMIT 5
+                """)
+                zones = cur.fetchall()
+                if zones:
+                    zone_strs = [f"{z[0]}: {z[1][:50]} ({z[2]})" for z in zones]
+                    context_parts.append(f"ZONING: {'; '.join(zone_strs)}")
+
+                # Flood zones
+                cur.execute(f"""
+                    SELECT flood_zone_type, COUNT(*)
+                    FROM flood_zones WHERE ST_Intersects(geom, ST_Buffer({center_sql}::geography, {req.radius})::geometry)
+                    GROUP BY 1
+                """)
+                floods = cur.fetchall()
+                if floods:
+                    flood_strs = [f"{f[0]}: {f[1]} zones" for f in floods]
+                    context_parts.append(f"FLOOD RISK: {'; '.join(flood_strs)}")
+
+                # Protected structures
+                cur.execute(f"SELECT COUNT(*) FROM niah_buildings WHERE {dwithin}")
+                row = cur.fetchone()
+                if row and row[0] > 0:
+                    context_parts.append(f"PROTECTED STRUCTURES: {row[0]} NIAH buildings (development constraints)")
+
+                # Commercial
+                cur.execute(f"""
+                    SELECT COUNT(*), STRING_AGG(DISTINCT category, ', '),
+                           COALESCE(ROUND(AVG(valuation)),0)
+                    FROM commercial_valuations WHERE {dwithin}
+                """)
+                row = cur.fetchone()
+                if row and row[0] > 0:
+                    context_parts.append(f"COMMERCIAL: {row[0]} properties (categories: {row[1]}), avg valuation €{row[2]:,.0f}")
+
+                # Amenities
+                cur.execute(f"SELECT COUNT(*) FROM osm_amenities WHERE {dwithin}")
+                amn = cur.fetchone()[0]
+                cur.execute(f"SELECT COUNT(*) FROM osm_transport WHERE {dwithin}")
+                trn = cur.fetchone()[0]
+                cur.execute(f"SELECT COUNT(*) FROM schools WHERE {dwithin}")
+                sch = cur.fetchone()[0]
+                if amn + trn + sch > 0:
+                    context_parts.append(f"AMENITIES: {amn} POI, {trn} transport stops, {sch} schools within radius")
+
+                # Parcels
+                cur.execute(f"""
+                    SELECT COUNT(*),
+                           COALESCE(ROUND(AVG(ST_Area(ST_Transform(geom,2157)))::numeric),0),
+                           COALESCE(ROUND(MAX(ST_Area(ST_Transform(geom,2157)))::numeric),0)
+                    FROM cadastral_freehold WHERE {dwithin}
+                """)
+                row = cur.fetchone()
+                if row and row[0] > 0:
+                    context_parts.append(f"PARCELS: {row[0]} freehold parcels, avg size {row[1]:,.0f} sqm, largest {row[2]:,.0f} sqm")
+
+        finally:
+            put_conn(conn)
+
+        yield sse("status", {"phase": "analyzing", "message": "AI analyzing area..."})
+
+        # ── 2. Send to Gemini for analysis ────────────────────────────
+        context_text = "\n".join(context_parts) if context_parts else "No data found in this area."
+
+        follow_up_context = ""
+        if req.query:
+            follow_up_context = f"\n\nThe user has a specific question about this area: {req.query}\nAnswer their question using the data above."
+
+        analysis_prompt = f"""You are a land intelligence analyst for Irish property developers.
+
+Analyze this area (center: {req.lat:.6f}, {req.lng:.6f}, radius: {req.radius:.0f}m):
+
+{context_text}
+{follow_up_context}
+
+Provide a structured analysis in this JSON format:
+{{
+  "area_name": "Best guess at area name based on coordinates",
+  "overview": "2-3 sentence overview of what this area is",
+  "market_summary": "Key price metrics, trends, and market position",
+  "development_potential": "Assessment of development opportunities based on zoning, RZLT, vacancy, and parcel sizes",
+  "risk_factors": "Flood risk, protected structures, planning refusal rates, or other constraints",
+  "key_opportunities": ["List 3-5 specific actionable opportunities for a developer"],
+  "follow_ups": [
+    {{"label": "short label", "prompt": "follow-up question"}},
+    {{"label": "short label", "prompt": "follow-up question"}},
+    {{"label": "short label", "prompt": "follow-up question"}}
+  ]
+}}
+
+Be specific and quantitative. Reference actual numbers from the data. Focus on actionable insights for a property developer."""
+
+        try:
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            response = model.generate_content(
+                analysis_prompt,
+                generation_config=genai.GenerationConfig(
+                    response_mime_type="application/json",
+                    temperature=0.3,
+                ),
+            )
+            analysis = json.loads(response.text)
+        except Exception as e:
+            analysis = {
+                "area_name": "Analysis Area",
+                "overview": f"Error generating analysis: {str(e)}",
+                "market_summary": context_text,
+                "development_potential": "Unable to assess",
+                "risk_factors": "Unable to assess",
+                "key_opportunities": [],
+                "follow_ups": [],
+            }
+
+        yield sse("area_analysis", {
+            "analysis": analysis,
+            "context": context_parts,
+            "center": {"lng": req.lng, "lat": req.lat},
+            "radius": req.radius,
+        })
+        yield sse("done", {})
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @app.post("/api/ai/chat")
 async def ai_chat(req: ChatRequest):
     """AI-powered property analytics chat with intent routing.

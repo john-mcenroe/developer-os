@@ -18,6 +18,8 @@ import { DetailPanel } from './DetailPanel';
 import { SiteSearch } from './SiteSearch';
 import { ZoomIndicator } from './ZoomIndicator';
 import { BasemapToggle } from './BasemapToggle';
+import { AreaAnalysisPanel } from './AreaAnalysisPanel';
+import { useCircleAnalysis } from '../hooks/useCircleAnalysis';
 
 import type { ViewState, SiteSearchResult, AreaFocus } from '../types';
 
@@ -78,6 +80,13 @@ export function MapView() {
   // AI Site Search
   const siteSearch = useSiteSearch();
   const [searchSelectedIndex, setSearchSelectedIndex] = useState<number | null>(null);
+
+  // Circle Analysis
+  const circleAnalysis = useCircleAnalysis();
+  const [circleDrawMode, setCircleDrawMode] = useState(false);
+  const [circleDrawStart, setCircleDrawStart] = useState<{ lng: number; lat: number } | null>(null);
+  const [circleDrawRadius, setCircleDrawRadius] = useState(0);
+  const [circleGeoJSON, setCircleGeoJSON] = useState<GeoJSON.FeatureCollection>({ type: 'FeatureCollection', features: [] });
 
   const TABLE_TO_DETAIL: Record<string, string> = {
     sold_properties: 'sold',
@@ -297,10 +306,55 @@ export function MapView() {
     });
   }, []);
 
+  // Circle drawing helpers
+  const makeCircleGeoJSON = useCallback((centerLng: number, centerLat: number, radiusM: number): GeoJSON.FeatureCollection => {
+    const points = 64;
+    const coords: [number, number][] = [];
+    for (let i = 0; i <= points; i++) {
+      const angle = (i / points) * 2 * Math.PI;
+      const dx = radiusM * Math.cos(angle);
+      const dy = radiusM * Math.sin(angle);
+      const lat = centerLat + (dy / 111320);
+      const lng = centerLng + (dx / (111320 * Math.cos(centerLat * Math.PI / 180)));
+      coords.push([lng, lat]);
+    }
+    return {
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        geometry: { type: 'Polygon', coordinates: [coords] },
+        properties: {},
+      }],
+    };
+  }, []);
+
   const handleMapClick = useCallback(
     (e: MapLayerMouseEvent) => {
       const map = mapRef.current?.getMap();
       if (!map) return;
+
+      // Circle draw mode: first click sets center, second click sets radius
+      if (circleDrawMode) {
+        if (!circleDrawStart) {
+          setCircleDrawStart({ lng: e.lngLat.lng, lat: e.lngLat.lat });
+          return;
+        } else {
+          // Calculate radius from center to click point
+          const dlng = e.lngLat.lng - circleDrawStart.lng;
+          const dlat = e.lngLat.lat - circleDrawStart.lat;
+          const radiusM = Math.sqrt(
+            (dlng * 111320 * Math.cos(circleDrawStart.lat * Math.PI / 180)) ** 2 +
+            (dlat * 111320) ** 2
+          );
+          const finalRadius = Math.max(100, Math.min(5000, radiusM));
+          setCircleDrawRadius(finalRadius);
+          setCircleGeoJSON(makeCircleGeoJSON(circleDrawStart.lng, circleDrawStart.lat, finalRadius));
+          setCircleDrawMode(false);
+          // Trigger analysis
+          circleAnalysis.analyze(circleDrawStart.lng, circleDrawStart.lat, finalRadius);
+          return;
+        }
+      }
 
       // Query features at click point across all interactive layers
       const interactiveLayers = [
@@ -439,6 +493,27 @@ export function MapView() {
   const handleCursorChange = useCallback((e: MapLayerMouseEvent) => {
     const map = mapRef.current?.getMap();
     if (!map) return;
+
+    // Circle draw preview
+    if (circleDrawMode && circleDrawStart) {
+      const dlng = e.lngLat.lng - circleDrawStart.lng;
+      const dlat = e.lngLat.lat - circleDrawStart.lat;
+      const r = Math.sqrt(
+        (dlng * 111320 * Math.cos(circleDrawStart.lat * Math.PI / 180)) ** 2 +
+        (dlat * 111320) ** 2
+      );
+      const clamped = Math.max(100, Math.min(5000, r));
+      setCircleDrawRadius(clamped);
+      setCircleGeoJSON(makeCircleGeoJSON(circleDrawStart.lng, circleDrawStart.lat, clamped));
+      map.getCanvas().style.cursor = 'crosshair';
+      return;
+    }
+
+    if (circleDrawMode) {
+      map.getCanvas().style.cursor = 'crosshair';
+      return;
+    }
+
     const interactiveLayers = [
       'cadastral_freehold-fill', 'cadastral_leasehold-fill',
       'dlr_planning_polygons-fill', 'dlr_planning_points-fill',
@@ -1131,7 +1206,68 @@ export function MapView() {
             }}
           />
         </Source>
+        {/* === Circle Analysis Drawing === */}
+        <Source id="circle-draw" type="geojson" data={circleGeoJSON}>
+          <Layer
+            id="circle-draw-fill"
+            type="fill"
+            paint={{
+              'fill-color': 'rgba(59, 130, 246, 0.12)',
+              'fill-outline-color': 'rgba(59, 130, 246, 0)',
+            }}
+          />
+          <Layer
+            id="circle-draw-outline"
+            type="line"
+            paint={{
+              'line-color': '#3b82f6',
+              'line-width': 2,
+              'line-dasharray': [3, 2],
+            }}
+          />
+        </Source>
       </MapGL>
+
+      {/* Circle draw button */}
+      <button
+        className={`circle-draw-btn ${circleDrawMode ? 'active' : ''}`}
+        onClick={() => {
+          if (circleDrawMode) {
+            setCircleDrawMode(false);
+            setCircleDrawStart(null);
+            setCircleDrawRadius(0);
+            setCircleGeoJSON({ type: 'FeatureCollection', features: [] });
+          } else {
+            setCircleDrawMode(true);
+            setCircleDrawStart(null);
+            setCircleDrawRadius(0);
+          }
+        }}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <circle cx="12" cy="12" r="10" />
+          <circle cx="12" cy="12" r="1" />
+        </svg>
+        {circleDrawMode
+          ? (circleDrawStart ? `Click to set radius (${Math.round(circleDrawRadius)}m)` : 'Click center point')
+          : 'Analyze Area'}
+      </button>
+
+      {/* Area Analysis Panel */}
+      <AreaAnalysisPanel
+        state={circleAnalysis}
+        onFollowUp={(query) => {
+          if (circleAnalysis.center) {
+            circleAnalysis.analyze(circleAnalysis.center.lng, circleAnalysis.center.lat, circleAnalysis.radius, query);
+          }
+        }}
+        onClose={() => {
+          circleAnalysis.clear();
+          setCircleGeoJSON({ type: 'FeatureCollection', features: [] });
+          setCircleDrawStart(null);
+          setCircleDrawRadius(0);
+        }}
+      />
 
       {/* Overlay controls */}
       <div className="map-overlays">

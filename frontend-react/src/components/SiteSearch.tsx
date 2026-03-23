@@ -3,13 +3,35 @@ import type { SiteSearchResult, AreaFocus } from '../types';
 
 const HYPOTHESIS_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#06b6d4'];
 
-const PLACEHOLDER_PROMPTS = [
-  'Find large sites near DART stations with RZLT tax pressure...',
-  'Undervalued areas with high vacancy rates in South Dublin...',
-  'Sites over 1 acre with recent planning permissions granted...',
-  'Areas where sale prices are below census median income...',
-  'RZLT sites near schools with low development density...',
+const STARTER_CATEGORIES = [
+  {
+    category: 'Find Sites',
+    prompts: [
+      { label: 'RZLT sites near DART', prompt: 'Find RZLT sites over 0.5 acres near DART or Luas stops in south Dublin' },
+      { label: 'Large freehold parcels', prompt: 'Show me large freehold parcels over 1 acre with no recent planning applications' },
+      { label: 'Granted planning 10+ units', prompt: 'Find sites with recently granted planning for 10+ residential units' },
+    ],
+  },
+  {
+    category: 'Market Intel',
+    prompts: [
+      { label: 'Compare areas', prompt: 'Compare Rathmines, Ranelagh, and Sandymount for residential development potential' },
+      { label: 'Price trends', prompt: 'Where are house prices rising fastest in Dublin? Show me the top 5 areas' },
+      { label: 'Commercial hotspots', prompt: 'Find areas with high commercial vacancy rates but strong transport links' },
+    ],
+  },
+  {
+    category: 'Area Research',
+    prompts: [
+      { label: 'Demographic profile', prompt: 'Give me a demographic and development profile of Dundrum and surrounding areas' },
+      { label: 'Zoning gaps', prompt: 'Find areas where land is zoned residential but currently used as farmland or industrial' },
+      { label: 'Flood + development', prompt: 'Which RZLT sites in Dublin are NOT in flood risk zones? Rank by size' },
+      { label: 'Underserved areas', prompt: 'Find high-density residential areas with few amenities within 500m' },
+    ],
+  },
 ];
+
+const PLACEHOLDER_PROMPTS = STARTER_CATEGORIES.flatMap(c => c.prompts.map(p => p.prompt + '...'));
 
 interface SiteSearchProps {
   results: SiteSearchResult[];
@@ -254,6 +276,28 @@ export function SiteSearch({
         </button>
       )}
 
+      {/* Starter prompts when idle */}
+      {!hasResults && !isLoading && !query && (
+        <div className="search-starters">
+          {STARTER_CATEGORIES.map((cat) => (
+            <div key={cat.category} className="search-starter-group">
+              <span className="search-starter-label">{cat.category}</span>
+              <div className="search-starter-chips">
+                {cat.prompts.map((p) => (
+                  <button
+                    key={p.label}
+                    className="search-starter-chip"
+                    onClick={() => { setQuery(p.prompt); setExpanded(true); onSearch(p.prompt); }}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Search Bar (always at bottom) */}
       <form className="site-search-bar" onSubmit={handleSubmit}>
         <div className="site-search-icon">
@@ -307,10 +351,21 @@ const TABLE_LABELS: Record<string, string> = {
   cadastral_freehold: 'Freehold',
   cadastral_leasehold: 'Leasehold',
   rzlt: 'RZLT',
-  dlr_planning_polygons: 'Planning',
-  dlr_planning_points: 'Planning',
+  dlr_planning_polygons: 'DLR Planning',
+  dlr_planning_points: 'DLR Planning',
+  national_planning_points: 'Planning',
+  national_planning_polygons: 'Planning',
   census_small_areas: 'Census',
   side_sites: 'Side Site',
+  osm_buildings: 'Building',
+  osm_amenities: 'Amenity',
+  osm_transport: 'Transport',
+  schools: 'School',
+  landuse: 'Land Use',
+  zoning: 'Zoning',
+  flood_zones: 'Flood Zone',
+  niah_buildings: 'Protected',
+  commercial_valuations: 'Commercial',
 };
 
 const TABLE_COLORS: Record<string, string> = {
@@ -320,20 +375,44 @@ const TABLE_COLORS: Record<string, string> = {
   rzlt: '#ef4444',
   dlr_planning_polygons: '#2ecc71',
   dlr_planning_points: '#2ecc71',
+  national_planning_points: '#2ecc71',
+  national_planning_polygons: '#2ecc71',
   census_small_areas: '#00bcd4',
   side_sites: '#f9a825',
+  osm_buildings: '#795548',
+  osm_amenities: '#e91e63',
+  osm_transport: '#1976d2',
+  schools: '#4caf50',
+  landuse: '#8bc34a',
+  zoning: '#9c27b0',
+  flood_zones: '#2196f3',
+  niah_buildings: '#ff9800',
+  commercial_valuations: '#e91e63',
 };
 
 function getResultTitle(r: SiteSearchResult): string {
   if (r.address) return String(r.address).split(',').slice(0, 2).join(', ');
   if (r.plan_ref) return String(r.plan_ref);
   if (r.zone_desc) return String(r.zone_desc);
+  if (r.zone_code) return `${r.zone_code} Zone`;
   if (r.national_ref) return `Parcel ${r.national_ref}`;
   if (r.nationalcadastralreference) return `Parcel ${r.nationalcadastralreference}`;
+  if (r.uses) return String(r.uses);
+  if (r.name) return String(r.name);
   if (r.sa_code) return `Area ${r.sa_code}`;
   if (r.urban_area) return String(r.urban_area);
   if (r.county) return String(r.county);
   return `Site #${(r._rank ?? 0) + 1}`;
+}
+
+function getResultSubtitle(r: SiteSearchResult): string | null {
+  const parts: string[] = [];
+  if (r.local_authority) parts.push(String(r.local_authority));
+  if (r.zone_code && r.zone_description) parts.push(String(r.zone_description).slice(0, 60));
+  if (r.category && r._table === 'commercial_valuations') parts.push(String(r.category));
+  if (r.decision && r._table?.includes('planning')) parts.push(`Decision: ${r.decision}`);
+  if (r.flood_zone_type) parts.push(`Flood: ${r.flood_zone_type}`);
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 function formatArea(sqm: number): string {
@@ -341,15 +420,29 @@ function formatArea(sqm: number): string {
   return `${Math.round(sqm).toLocaleString()} m²`;
 }
 
-function getMetricChips(r: SiteSearchResult): { label: string; value: string }[] {
-  const m: { label: string; value: string }[] = [];
+function getMetricChips(r: SiteSearchResult): { label: string; value: string; highlight?: boolean }[] {
+  const m: { label: string; value: string; highlight?: boolean }[] = [];
+  // Sales
   if (r.sale_price) m.push({ label: 'Price', value: `€${Number(r.sale_price).toLocaleString()}` });
+  if (r.price_per_sqm) m.push({ label: '€/m²', value: `€${Math.round(Number(r.price_per_sqm)).toLocaleString()}` });
+  // Area
   if (r.area_sqm) m.push({ label: 'Area', value: formatArea(Number(r.area_sqm)) });
   if (r.site_area) m.push({ label: 'Area', value: formatArea(Number(r.site_area)) });
-  if (r.price_per_sqm) m.push({ label: '€/m²', value: `€${Number(r.price_per_sqm).toLocaleString()}` });
+  if (r.total_floor_area) m.push({ label: 'Floor', value: `${Number(r.total_floor_area).toLocaleString()} m²` });
+  if (r.hectares) m.push({ label: 'Area', value: `${Number(r.hectares).toFixed(1)} ha` });
+  // Commercial
+  if (r.valuation) m.push({ label: 'Valuation', value: `€${Number(r.valuation).toLocaleString()}` });
+  // Planning
+  if (r.num_units) m.push({ label: 'Units', value: String(r.num_units), highlight: true });
+  // Demographics
   if (r.total_population) m.push({ label: 'Pop', value: Number(r.total_population).toLocaleString() });
-  if (r.vacancy_rate != null) m.push({ label: 'Vacancy', value: `${r.vacancy_rate}%` });
-  return m.slice(0, 3);
+  if (r.vacancy_rate != null) m.push({ label: 'Vacancy', value: `${Number(r.vacancy_rate).toFixed(1)}%` });
+  if (r.apartment_pct != null) m.push({ label: 'Apt %', value: `${Number(r.apartment_pct).toFixed(0)}%` });
+  // Risk
+  if (r.flood_zone_type) m.push({ label: 'Flood', value: String(r.flood_zone_type), highlight: true });
+  // Distance
+  if (r.distance_m) m.push({ label: 'Distance', value: `${Math.round(Number(r.distance_m))}m` });
+  return m.slice(0, 4);
 }
 
 function SearchResultItem({ result, index, isSelected, onClick }: {
@@ -362,9 +455,10 @@ function SearchResultItem({ result, index, isSelected, onClick }: {
   const score = rawScore > 1 ? Math.round(rawScore) : Math.round(rawScore * 100);
   const scoreColor = score >= 70 ? '#22c55e' : score >= 50 ? '#f59e0b' : '#ef4444';
   const table = result._table || '';
-  const tagLabel = TABLE_LABELS[table] || table;
+  const tagLabel = TABLE_LABELS[table] || table.replace(/_/g, ' ');
   const tagColor = TABLE_COLORS[table] || '#6b7394';
   const title = getResultTitle(result);
+  const subtitle = getResultSubtitle(result);
   const metrics = getMetricChips(result);
 
   return (
@@ -387,11 +481,16 @@ function SearchResultItem({ result, index, isSelected, onClick }: {
           <span className="sri-tag" style={{ color: tagColor, borderColor: tagColor }}>{tagLabel}</span>
         </div>
 
+        {/* Subtitle with context */}
+        {subtitle && (
+          <div className="sri-subtitle">{subtitle}</div>
+        )}
+
         {/* Metrics row */}
         {metrics.length > 0 && (
           <div className="sri-metrics">
             {metrics.map((m, i) => (
-              <span key={i} className="sri-metric">
+              <span key={i} className={`sri-metric ${m.highlight ? 'highlight' : ''}`}>
                 <strong>{m.value}</strong> {m.label}
               </span>
             ))}
