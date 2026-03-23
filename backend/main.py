@@ -2252,9 +2252,11 @@ ALLOWED_TABLES = {
 }
 
 SQL_BLOCKLIST = re.compile(
-    r'(?<![A-Za-z_])(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY|EXECUTE)(?![A-Za-z_])',
+    r'(?<![A-Za-z_])(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|REVOKE|COPY|EXECUTE)(?![A-Za-z_])',
     re.IGNORECASE,
 )
+# Note: GRANT is NOT in the blocklist because it appears legitimately in
+# planning decision filters like UPPER(decision) LIKE '%GRANT%'
 
 # ── Intent Router Prompt ─────────────────────────────────────────────────────
 
@@ -2650,8 +2652,11 @@ YOUR TASK: Given the user's question, form 3-5 distinct hypotheses about where o
 CRITICAL — GETTING RESULTS IS THE #1 PRIORITY:
 - It is MUCH better to return results with loose filters than to return 0 results with perfect filters.
 - Start with simple, broad queries. Only add restrictive WHERE clauses if the user specifically asks for constraints.
-- If the user asks about an area OUTSIDE Dublin (e.g. Maynooth, Greystones, Wicklow, Navan), ONLY use nationally-available tables: rzlt, national_planning_polygons, national_planning_points, sold_properties. Do NOT use cadastral_freehold, cadastral_leasehold, osm_buildings, commercial_valuations, census_small_areas, or zoning — they only have Dublin data.
+- NEVER add filters the user didn't ask for. If they say "find apartments", don't also filter by price, size, or date unless they said to.
+- If a query might return 0 results, make it BROADER rather than more specific. Remove one WHERE clause at a time.
+- If the user asks about an area OUTSIDE Dublin (e.g. Maynooth, Greystones, Wicklow, Navan, Cork, Galway, any non-Dublin Irish location), ONLY use nationally-available tables: rzlt, national_planning_polygons, national_planning_points, sold_properties, osm_amenities, osm_transport, flood_zones, niah_buildings, schools, landuse. Do NOT use cadastral_freehold, cadastral_leasehold, osm_buildings, commercial_valuations, census_small_areas, or zoning — they only have Dublin data.
 - For RZLT queries: site_area is in HECTARES. For "mid-sized" residential, use site_area BETWEEN 0.05 AND 5 (500sqm to 5ha). Do NOT use sqm-scale filters like area > 150.
+- If no specific location is mentioned, default to Dublin-wide (bbox roughly -6.45 to -6.05, 53.25 to 53.45).
 
 {DB_SCHEMA_PROMPT}
 
@@ -2712,6 +2717,24 @@ RESULT QUALITY FILTERS (apply ONLY to cadastral queries in Dublin — do NOT ove
 - For commercial_valuations queries: always SELECT floor_details, valuation, uses, category, total_floor_area
 - IMPORTANT: Do NOT add quality filters to RZLT, national_planning, or sold_properties queries — these tables have clean data and filters cause 0 results
 - For RZLT: site_area is in HECTARES. Use site_area > 0.05 at most (500sqm minimum). Do NOT filter by compactness.
+
+COLUMN NAMING — CRITICAL (different tables use different column names for similar concepts):
+- "name" column: ONLY exists on osm_buildings, osm_amenities, osm_transport, schools, niah_buildings, landuse. Most tables do NOT have a "name" column.
+- Address/location identifiers by table:
+  * sold_properties → address
+  * cadastral_freehold/leasehold → nationalcadastralreference (no address or name)
+  * rzlt → zone_desc, local_authority_name (no address or name)
+  * national_planning_* → developmentaddress, applicationnumber
+  * dlr_planning_* → location, plan_ref
+  * commercial_valuations → address
+  * census_small_areas → sa_urban_area_name, county_english (no address or name)
+- Area/size by table:
+  * cadastral_freehold/leasehold → area_sqm (square meters)
+  * rzlt → site_area (HECTARES, not sqm)
+  * commercial_valuations → total_floor_area (square meters)
+  * sold_properties → floor_area_m2 (square meters)
+  * national_planning_* → areaofsite, floorarea
+- NEVER SELECT a column that doesn't exist on the table. Check the schema above.
 
 QUERY PLAN OPTION (use for simple single-table queries):
 For straightforward single-table queries with filters, you may use a structured "query_plan" instead of raw SQL.
@@ -2797,13 +2820,14 @@ RESPONSE FORMAT (valid JSON only, no markdown):
 }}
 
 RULES:
-- "sites" must contain 8-15 entries, ranked best-first.
-- hypothesis_index / query_index / row_index are 0-based indices into the input data.
+- "sites" must contain 8-15 entries, ranked best-first. If fewer than 8 quality results exist, include all available (even 1-2 is fine).
+- hypothesis_index / query_index / row_index are 0-based integers referencing the input data arrays. Double-check they are valid before including.
 - ONLY select rows that have actual site data (geometry, address, or parcel ref). Skip aggregate-only rows.
 - Skip rows from queries that returned errors.
 - "score" is 0-100 representing opportunity strength: 90+ = exceptional, 70-89 = strong, 50-69 = moderate, below 50 = weak. Score based on: size of opportunity, data confidence, actionability.
-- "follow_ups" should have exactly 3 entries.
+- "follow_ups" should have exactly 3 entries. Each should be a specific, actionable query the user can run next.
 - If no queries returned useful results, set sites to [] and explain in summary what the developer should try instead.
+- IMPORTANT: Use ONLY the data fields that exist in the actual query results. Different tables have different columns — do NOT reference fields that aren't in the results.
 
 TITLE RULES:
 - "title" is a short descriptive label (max 8 words) for the site. Include size, type/use, and location/area name.
@@ -2853,7 +2877,7 @@ Add these 4 fields to your JSON response at the top level.
 
 # ── Agentic Loop: SQL Retry & Broaden Prompts ─────────────────────────────────
 
-SQL_RETRY_PROMPT = """You are a PostGIS SQL expert fixing a broken query for a Dublin property intelligence system.
+SQL_RETRY_PROMPT = """You are a PostGIS SQL expert fixing a broken query for an Irish property intelligence system.
 
 ORIGINAL QUERY:
 {original_sql}
@@ -2863,11 +2887,18 @@ ERROR:
 
 {db_schema}
 
+COMMON FIXES:
+- "column X does not exist" → Check the schema above — each table has DIFFERENT columns. "name" only exists on osm_buildings, osm_amenities, osm_transport, schools, niah_buildings. Most tables use "address", "zone_desc", "nationalcadastralreference", etc.
+- "function st_x(geometry)" → Use ST_X(ST_Centroid(geom)) for polygon tables, ST_X(geom) for point tables only
+- "division by zero" → Use NULLIF(x, 0) around divisors
+- "column reference is ambiguous" → Qualify with table alias
+- "relation does not exist" → Check table name spelling against schema
+
 SQL RULES:
-- Always SELECT ST_AsGeoJSON(geometry) AS geometry for spatial columns
+- Every query MUST include: ST_AsGeoJSON(tablename.geom)::json AS geometry
+- For POLYGON tables: ST_X(ST_Centroid(tablename.geom)) AS lng, ST_Y(ST_Centroid(tablename.geom)) AS lat
+- For POINT tables: ST_X(tablename.geom) AS lng, ST_Y(tablename.geom) AS lat
 - Table/column names are lowercase
-- Use ST_Transform(geometry, 2157) for area/distance calculations (Irish TM)
-- Always include a geometry column in results
 - LIMIT 25 max
 - READ ONLY — no INSERT/UPDATE/DELETE
 
@@ -2884,11 +2915,17 @@ QUERY INTENT: {description}
 
 {db_schema}
 
-The query returned no rows. Broaden it by:
-1. Relaxing geographic constraints (larger area, remove neighborhood filter)
-2. Relaxing numeric thresholds (lower minimums, higher maximums)
-3. Removing the most restrictive WHERE clause
-4. If searching a specific area, try Dublin-wide instead
+The query returned no rows. This is the MOST IMPORTANT thing to fix — we MUST return results.
+
+Broaden aggressively by doing ALL of these:
+1. REMOVE the most restrictive WHERE clause entirely (don't just relax it)
+2. DOUBLE the geographic area (expand bbox by 0.05 degrees in each direction, or increase radius to 2000m)
+3. If filtering by price, area, or date — remove those filters entirely
+4. If searching a specific neighborhood, expand to all of Dublin (bbox: -6.45 to -6.05, 53.25 to 53.45)
+5. If using LIKE or pattern matching, simplify to a broader pattern or remove it
+6. Keep ONLY the spatial filter and the table-specific essentials (e.g. sale_price > 0 for sold_properties)
+
+IMPORTANT: The broadened query MUST return results. Be aggressive in removing filters.
 
 Keep the same SELECT columns and geometry. LIMIT 25.
 
@@ -2896,22 +2933,28 @@ Return valid JSON only:
 {{"corrected_sql": "SELECT ...", "explanation": "brief description of what you relaxed"}}
 """
 
-FALLBACK_HYPOTHESIS_PROMPT = """You are LandOS AI. A property search query returned very few results. Generate ONE simple, broad PostGIS query to find relevant results.
+FALLBACK_HYPOTHESIS_PROMPT = """You are LandOS AI. A property search query returned very few or zero results. Generate ONE simple, broad PostGIS query that is GUARANTEED to return results.
 
 USER QUERY: {user_query}
 
 {db_schema}
 
 SQL RULES:
-- Always SELECT ST_AsGeoJSON(geometry) AS geometry
-- Table/column names are lowercase
-- Use ST_Transform(geometry, 2157) for area/distance
+- Every query MUST include: ST_AsGeoJSON(tablename.geom)::json AS geometry
+- For POLYGON tables: ST_X(ST_Centroid(tablename.geom)) AS lng, ST_Y(ST_Centroid(tablename.geom)) AS lat
+- For POINT tables (sold_properties, dlr_planning_points, national_planning_points): ST_X(tablename.geom) AS lng, ST_Y(tablename.geom) AS lat
+- Use a broad Dublin bbox: ST_MakeEnvelope(-6.45, 53.25, -6.05, 53.45, 4326)
 - LIMIT 25
-- Keep it simple — one table, minimal WHERE clauses
-- Focus on the most relevant table for the user's intent
+- Keep it simple — one table, almost NO WHERE clauses
+- Use the table most relevant to the user's intent:
+  * Sites/land/development → rzlt (use site_area > 0.01 only)
+  * Properties/houses/prices → sold_properties (use sale_price > 0 only)
+  * Planning/permissions → national_planning_polygons (use UPPER(decision) LIKE '%%GRANT%%' only)
+  * Commercial → commercial_valuations (no filters needed)
+- DO NOT add area, price, date, or type filters — we need RESULTS
 
-Return valid JSON only:
-{{"name": "Broad fallback search", "rationale": "Simplified search to find more results", "sql_queries": [{{"description": "...", "sql": "SELECT ..."}}]}}
+Return valid JSON only (include "primary_table"):
+{{"name": "Broad fallback search", "rationale": "Simplified search to find more results", "sql_queries": [{{"description": "...", "primary_table": "rzlt", "sql": "SELECT ..."}}]}}
 """
 
 
@@ -3015,6 +3058,27 @@ async def call_gemini_with_prompt(system_prompt: str, messages: list, max_tokens
                 return json.loads(match.group())
             except json.JSONDecodeError:
                 pass
+        # Try to repair truncated JSON (common when max_tokens is hit)
+        # Close any open arrays/objects
+        repaired = text.rstrip()
+        if repaired and not repaired.endswith("}"):
+            # Count open brackets
+            opens = repaired.count("{") + repaired.count("[")
+            closes = repaired.count("}") + repaired.count("]")
+            # Truncate to last complete element
+            # Find last complete object/array element
+            last_comma = repaired.rfind(",")
+            if last_comma > 0:
+                candidate = repaired[:last_comma]
+                # Close remaining brackets
+                open_braces = candidate.count("{") - candidate.count("}")
+                open_brackets = candidate.count("[") - candidate.count("]")
+                candidate += "]" * max(0, open_brackets) + "}" * max(0, open_braces)
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+        print(f"[AI] JSON parse failed. Text starts with: {text[:300]}")
         return {"error": f"Failed to parse Gemini JSON: {text[:200]}"}
 
 
@@ -3042,7 +3106,72 @@ def validate_sql(sql: str) -> str | None:
     return None
 
 
-POINT_TABLES = {"sold_properties", "dlr_planning_points", "national_planning_points"}
+POINT_TABLES = {
+    "sold_properties", "dlr_planning_points", "national_planning_points",
+    "osm_amenities", "osm_transport", "niah_buildings", "schools",
+    "commercial_valuations",
+}
+
+# Tables with data ONLY in Dublin region — queries outside Dublin will return 0 rows
+DUBLIN_ONLY_TABLES = {
+    "cadastral_freehold", "cadastral_leasehold", "osm_buildings",
+    "commercial_valuations", "census_small_areas", "zoning",
+    "dlr_planning_polygons", "dlr_planning_points",
+}
+
+# Tables with nationwide data
+NATIONWIDE_TABLES = {
+    "rzlt", "national_planning_polygons", "national_planning_points",
+    "sold_properties", "osm_amenities", "osm_transport",
+    "flood_zones", "niah_buildings", "schools", "landuse",
+}
+
+# Non-Dublin Irish locations that users might search for
+NON_DUBLIN_INDICATORS = [
+    "cork", "galway", "limerick", "waterford", "kilkenny", "wexford", "sligo",
+    "athlone", "drogheda", "dundalk", "navan", "naas", "maynooth", "celbridge",
+    "leixlip", "newbridge", "carlow", "mullingar", "tullamore", "ennis",
+    "tralee", "killarney", "letterkenny", "cavan", "longford", "roscommon",
+    "castlebar", "ballina", "westport", "arklow", "wicklow", "gorey",
+    "enniscorthy", "cobh", "midleton", "mallow", "kinsale", "youghal",
+    "nenagh", "thurles", "clonmel", "tipperary", "portlaoise", "carrick",
+    "shannon", "greystones", "bray",  # border towns that may lack Dublin data
+    "county cork", "county galway", "county kerry", "county mayo",
+    "county donegal", "county clare", "county wexford", "county wicklow",
+    "county meath", "county kildare", "county louth", "county tipperary",
+]
+
+
+def is_non_dublin_query(user_query: str) -> bool:
+    """Detect if the user is asking about an area outside Dublin."""
+    query_lower = user_query.lower()
+    # Check for explicit non-Dublin locations
+    for loc in NON_DUBLIN_INDICATORS:
+        if loc in query_lower:
+            # Exception: some Dublin locations share names (e.g., "Bray" is borderline)
+            # But it's safer to treat them as non-Dublin for table selection
+            return True
+    # Check for "outside Dublin", "not in Dublin", "nationwide", "all of Ireland"
+    if any(phrase in query_lower for phrase in [
+        "outside dublin", "not in dublin", "beyond dublin",
+        "nationwide", "national", "all of ireland", "across ireland",
+        "whole country", "every county",
+    ]):
+        return True
+    return False
+
+
+def filter_dublin_only_tables_from_sql(sql: str) -> str | None:
+    """Check if SQL references Dublin-only tables. Returns warning message or None."""
+    sql_lower = sql.lower()
+    used_dublin_tables = []
+    for table in DUBLIN_ONLY_TABLES:
+        # Check for table in FROM/JOIN clauses
+        if re.search(rf'\b{table}\b', sql_lower):
+            used_dublin_tables.append(table)
+    if used_dublin_tables:
+        return f"Query uses Dublin-only tables ({', '.join(used_dublin_tables)}) for a non-Dublin area"
+    return None
 
 
 def compile_query_plan(plan: dict) -> str:
@@ -3286,11 +3415,28 @@ async def generate_hypotheses(messages: list[ChatMessage], map_context: MapConte
 
     # Check for Gemini error responses
     if isinstance(result, dict) and result.get("error"):
-        raise Exception(f"Hypothesis generation failed: {result['error']}")
+        error_detail = result.get("error", "unknown")
+        print(f"[AI] Hypothesis generation Gemini error: {error_detail}")
+        raise Exception(f"Couldn't analyze that query — try rephrasing or simplifying your question.")
 
-    # Handle both {"hypotheses": [...]} and direct [...] responses
+    # Handle all possible Gemini response shapes:
+    # 1. {"hypotheses": [...]}  — standard
+    # 2. [{"name": ..., "sql_queries": ...}, ...]  — direct list of hypotheses
+    # 3. [{"hypotheses": [...]}]  — list-wrapped dict (Gemini quirk)
     if isinstance(result, list):
-        hypotheses = result
+        # Check if it's a list-wrapped dict like [{"hypotheses": [...]}]
+        if len(result) == 1 and isinstance(result[0], dict) and "hypotheses" in result[0]:
+            hypotheses = result[0]["hypotheses"]
+        elif len(result) > 0 and isinstance(result[0], dict) and "hypotheses" in result[0]:
+            # Multiple wrapped dicts — flatten all hypotheses
+            hypotheses = []
+            for item in result:
+                if isinstance(item, dict) and "hypotheses" in item:
+                    hypotheses.extend(item["hypotheses"])
+                elif isinstance(item, dict) and "sql_queries" in item:
+                    hypotheses.append(item)
+        else:
+            hypotheses = result
     else:
         hypotheses = result.get("hypotheses", [])
 
@@ -3545,17 +3691,22 @@ async def evaluate_hypotheses(user_query: str, hypotheses: list[dict]) -> dict:
     )
 
     eval_messages = [{"role": "user", "content": "Rank the best sites from these results."}]
-    result = await call_gemini_with_prompt(eval_prompt, eval_messages, max_tokens=4096)
+    result = await call_gemini_with_prompt(eval_prompt, eval_messages, max_tokens=8192)
 
     # Handle Gemini error responses gracefully
     if isinstance(result, dict) and result.get("error"):
-        # Return a minimal valid evaluation so downstream code doesn't crash
+        error_msg = result.get("error", "unknown error")
+        print(f"[AI] Evaluation Gemini error: {error_msg}")
         return {
             "type": "explore",
             "title": "Analysis Results",
-            "summary": f"AI ranking encountered an issue: {result['error']}. Showing best available results.",
+            "summary": "AI ranking had a hiccup — showing the best available results.",
             "sites": [],
-            "follow_ups": [],
+            "follow_ups": [
+                {"label": "Try simpler query", "prompt": "Find the largest development sites in Dublin"},
+                {"label": "Search RZLT sites", "prompt": "Show me RZLT sites over 0.5 hectares in south Dublin"},
+                {"label": "Recent planning grants", "prompt": "Show recent planning grants for residential development in Dublin"},
+            ],
             "object_type": "markers",
             "available_views": ["markers"],
         }
@@ -3571,6 +3722,31 @@ async def evaluate_hypotheses(user_query: str, hypotheses: list[dict]) -> dict:
     result.setdefault("object_type", "markers")
     result.setdefault("available_views", ["markers"])
 
+    # Validate sites array entries
+    valid_sites = []
+    for site in result.get("sites", []):
+        if not isinstance(site, dict):
+            continue
+        # Ensure required index fields are integers
+        try:
+            site["hypothesis_index"] = int(site.get("hypothesis_index", 0))
+            site["query_index"] = int(site.get("query_index", 0))
+            site["row_index"] = int(site.get("row_index", 0))
+        except (ValueError, TypeError):
+            continue
+        # Ensure score is an integer
+        try:
+            site["score"] = int(site.get("score", 50))
+        except (ValueError, TypeError):
+            site["score"] = 50
+        site.setdefault("title", "")
+        site.setdefault("reason", "")
+        site.setdefault("signals", [])
+        if not isinstance(site["signals"], list):
+            site["signals"] = []
+        valid_sites.append(site)
+    result["sites"] = valid_sites
+
     return result
 
 
@@ -3578,18 +3754,36 @@ def infer_table(row: dict) -> str:
     """Infer the source table from row columns."""
     if "address" in row and "sale_price" in row:
         return "sold_properties"
-    elif "zone_desc" in row or "site_area" in row:
+    elif "zone_desc" in row or ("site_area" in row and "local_authority_name" in row):
         return "rzlt"
     elif "planningauthority" in row or "applicationnumber" in row or "developmentdescription" in row:
         return "national_planning_polygons"
-    elif "plan_ref" in row or "decision" in row:
+    elif "plan_ref" in row or ("decision" in row and "descrptn" in row):
         return "dlr_planning_polygons"
-    elif "osm_id" in row or ("building" in row and "building_levels" in row):
+    elif "osm_id" in row and ("building" in row or "building_levels" in row):
         return "osm_buildings"
     elif "property_number" in row and ("uses" in row or "category" in row or "valuation" in row):
         return "commercial_valuations"
-    elif "nationalcadastralreference" in row or ("area_sqm" in row and "address" not in row):
+    elif "nationalcadastralreference" in row or ("area_sqm" in row and "address" not in row and "sale_price" not in row):
         return "cadastral_freehold"
+    elif "sa_pub2022" in row or "sa_urban_area_name" in row:
+        return "census_small_areas"
+    elif "flood_zone" in row or "flood_type" in row:
+        return "flood_zones"
+    elif "zone_code" in row or "zone_description" in row:
+        return "zoning"
+    elif "roll_number" in row and "school_type" in row:
+        return "schools"
+    elif "reg_no" in row and "original_type" in row:
+        return "niah_buildings"
+    elif "fclass" in row:
+        return "landuse"
+    elif "transport_type" in row:
+        return "osm_transport"
+    elif "amenity" in row and "osm_id" in row:
+        return "osm_amenities"
+    elif "site_area" in row:
+        return "rzlt"  # fallback for RZLT without local_authority_name
     return "unknown"
 
 
@@ -3618,25 +3812,139 @@ def extract_coords_from_geometry(row: dict):
         pass  # Malformed geometry — skip coord extraction
 
 
+def synthesize_title(row: dict, table: str) -> str:
+    """Generate a human-readable title for a result row based on its table and data.
+
+    This is the ultimate fallback — ensures every result has a meaningful title
+    even when the AI evaluation fails to provide one.
+    """
+    parts = []
+
+    # Size component
+    area_sqm = row.get("area_sqm")
+    site_area = row.get("site_area")
+    total_floor_area = row.get("total_floor_area")
+    floor_area_m2 = row.get("floor_area_m2")
+    if area_sqm:
+        try:
+            parts.append(f"{float(area_sqm):,.0f}sqm")
+        except (ValueError, TypeError):
+            pass
+    elif site_area:
+        try:
+            ha = float(site_area)
+            if ha < 1:
+                parts.append(f"{ha * 10000:,.0f}sqm")
+            else:
+                parts.append(f"{ha:,.1f}ha")
+        except (ValueError, TypeError):
+            pass
+    elif total_floor_area:
+        try:
+            parts.append(f"{float(total_floor_area):,.0f}sqm")
+        except (ValueError, TypeError):
+            pass
+    elif floor_area_m2:
+        try:
+            parts.append(f"{float(floor_area_m2):,.0f}sqm")
+        except (ValueError, TypeError):
+            pass
+
+    # Type/use component
+    if table == "sold_properties":
+        ptype = row.get("property_type")
+        if ptype:
+            parts.append(str(ptype))
+        else:
+            parts.append("Property")
+    elif table == "rzlt":
+        parts.append("RZLT Site")
+    elif table == "commercial_valuations":
+        uses = row.get("uses") or row.get("category")
+        if uses:
+            parts.append(str(uses).title()[:30])
+        else:
+            parts.append("Commercial")
+    elif table in ("cadastral_freehold", "cadastral_leasehold"):
+        parts.append("Land Parcel")
+    elif table in ("national_planning_polygons", "national_planning_points"):
+        parts.append("Planning App")
+    elif table in ("dlr_planning_polygons", "dlr_planning_points"):
+        parts.append("DLR Planning")
+    elif table == "osm_buildings":
+        btype = row.get("building")
+        if btype and btype != "yes":
+            parts.append(str(btype).title())
+        else:
+            parts.append("Building")
+    elif table == "census_small_areas":
+        parts.append("Census Area")
+    else:
+        parts.append("Site")
+
+    # Location component — try multiple fields
+    location = (
+        row.get("address")
+        or row.get("developmentaddress")
+        or row.get("location")
+        or row.get("sa_urban_area_name")
+        or row.get("local_authority_name")
+        or row.get("local_authority")
+        or row.get("town")
+        or row.get("county")
+        or ""
+    )
+    if location:
+        # Trim to just the area name (last part of address usually)
+        loc_str = str(location).strip()
+        if len(loc_str) > 40:
+            # Try to get just the area/town from end of address
+            loc_parts = loc_str.split(",")
+            loc_str = loc_parts[-1].strip() if loc_parts else loc_str[:40]
+        parts.append(loc_str)
+
+    return ", ".join(parts) if parts else "Site"
+
+
 def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
-    """Build a flat ranked list of sites from the evaluation's site picks."""
+    """Build a flat ranked list of sites from the evaluation's site picks.
+
+    Bulletproof: catches all KeyErrors and synthesizes missing fields.
+    """
     site_picks = evaluation.get("sites", [])
+    if not isinstance(site_picks, list):
+        site_picks = []
     results = []
 
     for rank, pick in enumerate(site_picks):
+        if not isinstance(pick, dict):
+            continue
         h_idx = pick.get("hypothesis_index", 0)
         q_idx = pick.get("query_index", 0)
         r_idx = pick.get("row_index", 0)
-        reason = pick.get("reason", "")
-        score = pick.get("score", 0)
 
+        # Validate indices are integers
         try:
-            query = hypotheses[h_idx]["sql_queries"][q_idx]
+            h_idx = int(h_idx)
+            q_idx = int(q_idx)
+            r_idx = int(r_idx)
+        except (ValueError, TypeError):
+            continue
+
+        # Bounds check with safe access
+        try:
+            if h_idx < 0 or h_idx >= len(hypotheses):
+                continue
+            h = hypotheses[h_idx]
+            queries = h.get("sql_queries", [])
+            if q_idx < 0 or q_idx >= len(queries):
+                continue
+            query = queries[q_idx]
             all_rows = query.get("result", {}).get("rows", [])
-            if r_idx >= len(all_rows):
+            if r_idx < 0 or r_idx >= len(all_rows):
                 continue
             row = dict(all_rows[r_idx])
-        except (IndexError, KeyError):
+        except (IndexError, KeyError, TypeError):
             continue
 
         # Extract lng/lat from geometry if not present as columns
@@ -3656,16 +3964,35 @@ def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
             except (ValueError, TypeError):
                 pass
 
+        # Safely extract pick metadata with defaults
+        reason = pick.get("reason", "") or ""
+        score = pick.get("score", 0)
+        try:
+            score = int(score)
+        except (ValueError, TypeError):
+            score = 50
+        title = pick.get("title", "") or ""
+        signals = pick.get("signals", [])
+        if not isinstance(signals, list):
+            signals = []
+
         row["opportunity_reason"] = reason
         row["_score"] = score
-        row["_title"] = pick.get("title", "")
-        row["_signals"] = pick.get("signals", [])
-        # Use tagged primary_table from Phase 1, fall back to inference
+        row["_signals"] = signals
+
+        # Determine table
         try:
             tagged_table = hypotheses[h_idx]["sql_queries"][q_idx].get("primary_table")
         except (IndexError, KeyError):
             tagged_table = None
         row["_table"] = tagged_table if tagged_table in ALLOWED_TABLES else infer_table(row)
+
+        # Synthesize title if AI didn't provide one
+        if title and title.strip() and not title.startswith("Site #"):
+            row["_title"] = title
+        else:
+            row["_title"] = synthesize_title(row, row["_table"])
+
         row["_rank"] = rank
         results.append(row)
 
@@ -3674,15 +4001,17 @@ def build_flat_results(hypotheses: list[dict], evaluation: dict) -> list[dict]:
         for h in hypotheses:
             for q in h.get("sql_queries", []):
                 rows = q.get("result", {}).get("rows", [])
+                table = q.get("primary_table") if q.get("primary_table") in ALLOWED_TABLES else None
                 for r_idx, row in enumerate(rows[:5]):
                     row = dict(row)
                     extract_coords_from_geometry(row)
                     if not row.get("lng") and not row.get("lat"):
                         continue
-                    row["_table"] = q.get("primary_table") if q.get("primary_table") in ALLOWED_TABLES else infer_table(row)
+                    effective_table = table or infer_table(row)
+                    row["_table"] = effective_table
                     row["_rank"] = len(results)
                     row["_score"] = 50  # default for fallback
-                    row["_title"] = ""  # no AI title for fallback results
+                    row["_title"] = synthesize_title(row, effective_table)
                     row["_signals"] = []
                     row["opportunity_reason"] = q.get("description", h.get("name", ""))
                     results.append(row)
@@ -4187,28 +4516,38 @@ async def ai_chat_stream(req: ChatRequest):
         # Explore pipeline
         # Detect area early for map fly-to
         detected_area = extract_area_from_query(user_query)
+        # Also try to detect non-Dublin Irish areas for geocoding
+        if not detected_area:
+            for loc in NON_DUBLIN_INDICATORS:
+                if loc.lower() in user_query.lower():
+                    detected_area = loc.title()
+                    break
         if detected_area:
             # Geocode the area to get coordinates for map fly-to
             try:
+                # Use Ireland-wide geocoding (not just Dublin)
+                geocode_query = f"{detected_area}, Ireland"
                 async with httpx.AsyncClient(timeout=5) as client:
                     geo_resp = await client.get(
                         "https://nominatim.openstreetmap.org/search",
                         params={
-                            "q": f"{detected_area}, Dublin, Ireland",
+                            "q": geocode_query,
                             "format": "json",
                             "limit": 1,
                             "countrycodes": "ie",
                         },
                         headers={"User-Agent": "LandOS/1.0"},
                     )
-                    if geo_resp.status_code == 200 and geo_resp.json():
-                        geo = geo_resp.json()[0]
-                        yield sse("area_focus", {
-                            "area": detected_area,
-                            "lat": float(geo["lat"]),
-                            "lng": float(geo["lon"]),
-                            "bbox": geo.get("boundingbox"),
-                        })
+                    if geo_resp.status_code == 200:
+                        geo_results = geo_resp.json()
+                        if geo_results and len(geo_results) > 0:
+                            geo = geo_results[0]
+                            yield sse("area_focus", {
+                                "area": detected_area,
+                                "lat": float(geo["lat"]),
+                                "lng": float(geo["lon"]),
+                                "bbox": geo.get("boundingbox"),
+                            })
             except Exception:
                 # Non-critical — skip fly-to if geocoding fails
                 pass
@@ -4231,6 +4570,9 @@ async def ai_chat_stream(req: ChatRequest):
 
         # Phase 2: Execute hypotheses in parallel
         import asyncio
+
+        # Detect non-Dublin queries for runtime table filtering
+        _is_non_dublin = is_non_dublin_query(user_query)
 
         h_names = [h.get("name", f"Strategy {i+1}") for i, h in enumerate(hypotheses)]
         yield sse("status", {
@@ -4264,6 +4606,22 @@ async def ai_chat_stream(req: ChatRequest):
                 if not sql.strip():
                     continue
 
+                # Runtime Dublin validation: skip Dublin-only tables for non-Dublin queries
+                if _is_non_dublin:
+                    dublin_warning = filter_dublin_only_tables_from_sql(sql)
+                    if dublin_warning:
+                        query["result"] = {
+                            "rows": [],
+                            "error": f"Skipped: {dublin_warning}. Only nationwide tables available for this area.",
+                            "row_count": 0,
+                        }
+                        await event_queue.put(("tool_action", {
+                            "action": "sql_skip",
+                            "hypothesis": h_name,
+                            "message": dublin_warning,
+                        }))
+                        continue
+
                 # Run SQL in thread pool to avoid blocking
                 result = None
                 for attempt in range(MAX_SQL_RETRIES + 1):
@@ -4272,24 +4630,27 @@ async def ai_chat_stream(req: ChatRequest):
 
                     # Case 1: SQL error — ask Gemini to fix
                     if result.get("error") and attempt < MAX_SQL_RETRIES:
+                        error_snippet = str(result.get("error", ""))[:200]
+                        print(f"[AI] SQL error (attempt {attempt+1}): {error_snippet}")
                         await event_queue.put(("tool_action", {
                             "action": "sql_retry",
                             "attempt": attempt + 1,
-                            "error": result["error"][:200],
+                            "error": error_snippet,
                             "hypothesis": h_name,
                         }))
                         try:
-                            fix = await retry_failed_sql(sql, result["error"])
+                            fix = await retry_failed_sql(sql, result.get("error", ""))
                             new_sql = fix.get("corrected_sql", "")
                             if new_sql.strip():
                                 sql = new_sql
                                 continue
-                        except Exception:
-                            pass
+                        except Exception as retry_err:
+                            print(f"[AI] SQL retry failed: {retry_err}")
                         break
 
                     # Case 2: Empty results — broaden
-                    elif result["row_count"] == 0 and not result.get("error") and attempt == 0:
+                    elif result.get("row_count", 0) == 0 and not result.get("error") and attempt == 0:
+                        print(f"[AI] 0 results for {h_name} — broadening...")
                         await event_queue.put(("tool_action", {
                             "action": "sql_broaden",
                             "hypothesis": h_name,
@@ -4302,8 +4663,10 @@ async def ai_chat_stream(req: ChatRequest):
                             if new_sql.strip():
                                 sql = new_sql
                                 continue
-                        except Exception:
-                            pass
+                            else:
+                                print(f"[AI] Broaden returned empty SQL for {h_name}")
+                        except Exception as broaden_err:
+                            print(f"[AI] Broaden failed for {h_name}: {broaden_err}")
                         break
 
                     else:
@@ -4445,18 +4808,28 @@ async def ai_chat_stream(req: ChatRequest):
             evaluation = await evaluate_hypotheses(user_query, hypotheses)
         except Exception as e:
             # Don't crash — create a minimal evaluation and try to show raw results
+            import traceback
+            print(f"[AI] Ranking failed: {type(e).__name__}: {e}")
+            traceback.print_exc()
             evaluation = {
                 "type": "explore",
                 "title": "Analysis Results",
-                "summary": f"Ranking encountered an issue, showing available results. ({e})",
+                "summary": "AI ranking had a hiccup — showing the best available results from your query.",
                 "sites": [],
-                "follow_ups": [],
+                "follow_ups": [
+                    {"label": "Try simpler query", "prompt": "Find the largest development sites in Dublin"},
+                    {"label": "Search RZLT sites", "prompt": "Show me RZLT sites over 0.5 hectares in south Dublin"},
+                    {"label": "Recent planning grants", "prompt": "Show recent planning grants for residential development in Dublin"},
+                ],
                 "object_type": "markers",
                 "available_views": ["markers"],
             }
         try:
             results = build_flat_results(hypotheses, evaluation)
-        except Exception:
+        except Exception as e:
+            import traceback
+            print(f"[AI] build_flat_results failed: {type(e).__name__}: {e}")
+            traceback.print_exc()
             results = []
         try:
             obj_type, available_views, choropleth_metric, heatmap_weight_col = determine_object_type(evaluation, results)

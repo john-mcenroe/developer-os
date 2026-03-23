@@ -1,9 +1,23 @@
 # LandOS Feature Tracker
 
-> **Last updated:** 2026-03-20
+> **Last updated:** 2026-03-23
 > Track progress by changing status: `[ ]` → `[~]` (in progress) → `[x]` (done)
 
 ---
+
+## Recently Completed
+
+- [x] **AI search robustness overhaul** — Comprehensive fix to the AI explore pipeline:
+  - [x] Fix KeyError 'name' crashes: bulletproof `build_flat_results` with safe index validation
+  - [x] Runtime Dublin vs non-Dublin table filtering (not just prompt-based)
+  - [x] Title synthesis fallback for all 17 table types when AI fails to provide titles
+  - [x] Column naming guidance in hypothesis prompt (tables have different column names)
+  - [x] Evaluation prompt validation of site picks (type-check indices, scores, signals)
+  - [x] User-friendly error messages instead of raw Python exceptions
+  - [x] Improved SQL broaden/retry prompts with common fix patterns
+  - [x] Non-Dublin area geocoding (fly-to works for Cork, Galway, etc.)
+  - [x] Better 0-result messaging with follow-up suggestions
+  - [x] Logging throughout the pipeline for debugging
 
 ## Quick Wins (days)
 

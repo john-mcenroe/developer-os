@@ -1372,6 +1372,120 @@ body {
   flex-shrink: 0;
 }
 
+/* ── Visualize Links ─────────────────────────────────────────── */
+.visualize-links {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.visualize-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: #1a1a2e;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: #a0c4ff;
+  font-size: 11px;
+  text-decoration: none;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.visualize-link:hover {
+  background: #252550;
+  border-color: #a0c4ff;
+  color: #fff;
+}
+
+.visualize-icon {
+  font-size: 13px;
+}
+
+/* ── Planning Detail Cards (expandable section) ──────────────── */
+.planning-details-list {
+  max-height: 400px;
+  overflow-y: auto;
+  transition: max-height 0.3s ease;
+}
+
+.planning-details-list.collapsed {
+  max-height: 0;
+  overflow: hidden;
+}
+
+.enrichment-section-title.clickable {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.enrichment-section-title.clickable:hover {
+  color: #ccc;
+}
+
+.expand-arrow {
+  font-size: 9px;
+  margin-left: auto;
+  transition: transform 0.2s;
+}
+
+.collapsed + .expand-arrow,
+.enrichment-section-title.clickable:has(+ .collapsed) .expand-arrow {
+  transform: rotate(-90deg);
+}
+
+.planning-detail-card {
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  background: #1a1a1a;
+}
+
+.planning-detail-card:hover {
+  border-color: #444;
+}
+
+.planning-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.planning-ref {
+  font-weight: 600;
+  font-size: 12px;
+  color: #ddd;
+}
+
+.planning-decision {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+
+.planning-detail-desc {
+  font-size: 11px;
+  color: #aaa;
+  line-height: 1.4;
+  margin-bottom: 4px;
+}
+
+.planning-detail-meta {
+  font-size: 10px;
+  color: #666;
+}
+
 /* ── Inline Stats (stat_answer response) ─────────────────────── */
 
 .ai-inline-stats {
